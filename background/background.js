@@ -32,6 +32,9 @@ async function checkUrl(url) {
     return { alive: true, status: response.status };
   } catch (error) {
     // Network error, timeout, or other issues
+    if (error.name === 'AbortError') {
+      return { alive: false, error: '超时' };
+    }
     return { alive: false, error: error.message };
   }
 }

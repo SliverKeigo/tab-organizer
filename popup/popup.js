@@ -1,5 +1,5 @@
 // Gemini API helper
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
 async function callGemini(apiKey, prompt) {
   const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
@@ -9,8 +9,7 @@ async function callGemini(apiKey, prompt) {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 4096,
-        responseMimeType: 'application/json'
+        maxOutputTokens: 4096
       }
     })
   });
@@ -21,18 +20,21 @@ async function callGemini(apiKey, prompt) {
   }
 
   const data = await response.json();
+  console.log('Gemini raw response:', data);
+  
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
   
   if (!text) {
     throw new Error('API 返回为空');
   }
 
+  console.log('Gemini text:', text);
   return text;
 }
 
-// Parse JSON from AI response (handles markdown code blocks)
+// Parse JSON from AI response (handles markdown code blocks and various formats)
 function parseJsonResponse(text) {
-  console.log('AI Raw Response:', text);
+  console.log('Parsing response:', text);
   
   let jsonStr = text.trim();
   
@@ -42,39 +44,22 @@ function parseJsonResponse(text) {
     jsonStr = codeBlockMatch[1].trim();
   }
   
-  // Try to find JSON object pattern
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    jsonStr = jsonMatch[0];
+  // Try to find JSON object - handle nested braces properly
+  const startIndex = jsonStr.indexOf('{');
+  const endIndex = jsonStr.lastIndexOf('}');
+  
+  if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+    jsonStr = jsonStr.substring(startIndex, endIndex + 1);
   }
   
-  // Clean up common issues
-  jsonStr = jsonStr
-    .replace(/,\s*}/g, '}')  // Remove trailing commas
-    .replace(/,\s*]/g, ']'); // Remove trailing commas in arrays
-  
-  console.log('Cleaned JSON:', jsonStr);
-  
   try {
-    const parsed = JSON.parse(jsonStr);
-    console.log('Parsed result:', parsed);
-    return parsed;
+    const result = JSON.parse(jsonStr);
+    console.log('Parsed result:', result);
+    return result;
   } catch (e) {
     console.error('JSON parse error:', e);
-    console.error('Failed text:', jsonStr);
-    
-    // Last resort: try to eval as object (risky but sometimes works)
-    try {
-      // Very basic attempt - only if it looks safe
-      if (jsonStr.startsWith('{') && jsonStr.endsWith('}')) {
-        const fn = new Function('return ' + jsonStr);
-        return fn();
-      }
-    } catch (e2) {
-      console.error('Fallback parse also failed:', e2);
-    }
-    
-    throw new Error('无法解析 AI 返回结果');
+    console.error('Failed to parse:', jsonStr);
+    throw new Error(`无法解析 AI 返回结果: ${e.message}`);
   }
 }
 
@@ -174,7 +159,7 @@ function showMessage(text, type = 'success') {
   messageEl.style.display = 'block';
   setTimeout(() => {
     messageEl.style.display = 'none';
-  }, 3000);
+  }, 5000);
 }
 
 // AI Organize bookmarks
@@ -196,8 +181,8 @@ organizeBtn.addEventListener('click', async () => {
       return;
     }
 
-    // Limit to first 100 bookmarks to avoid token limits
-    const bookmarksToProcess = bookmarks.slice(0, 100);
+    // Limit to first 50 bookmarks to avoid token limits
+    const bookmarksToProcess = bookmarks.slice(0, 50);
     
     // Prepare bookmarks info for AI
     const bookmarksInfo = bookmarksToProcess.map((b, index) => {
@@ -205,20 +190,23 @@ organizeBtn.addEventListener('click', async () => {
         const hostname = new URL(b.url).hostname;
         return `${index}. ${b.title || '无标题'} (${hostname})`;
       } catch {
-        return `${index}. ${b.title || '无标题'} (${b.url})`;
+        return `${index}. ${b.title || '无标题'}`;
       }
     }).join('\n');
 
-    const prompt = `将以下书签分类，返回 JSON 格式。
+    const prompt = `你是一个书签分类助手。请将以下书签分类。
 
-书签列表：
+书签：
 ${bookmarksInfo}
 
-分类规则：
-- key: 分类名（中文，如：技术文档、社交媒体、娱乐、购物、工具网站、其他）
-- value: 书签索引数组
+请返回一个JSON对象，格式如下：
+{"分类名1": [索引数组], "分类名2": [索引数组]}
 
-只返回 JSON 对象，不要任何解释。`;
+例如：
+{"技术": [0, 2, 5], "娱乐": [1, 3], "购物": [4]}
+
+分类名用中文，如：技术、社交、娱乐、购物、新闻、工具、其他
+只返回JSON，不要其他内容。`;
 
     showLoading('AI 正在分析...');
     const result = await callGemini(geminiApiKey, prompt);
@@ -226,8 +214,8 @@ ${bookmarksInfo}
     // Parse JSON from response
     const categories = parseJsonResponse(result);
     
-    if (!categories || typeof categories !== 'object') {
-      throw new Error('AI 返回格式不正确');
+    if (!categories || typeof categories !== 'object' || Object.keys(categories).length === 0) {
+      throw new Error('AI 返回格式不正确，请重试');
     }
     
     showLoading('正在整理书签...');
@@ -235,11 +223,16 @@ ${bookmarksInfo}
     // Put AI folders in Bookmark Bar (id: "1")
     const parentId = "1";
 
-    // Create an "AI 分类" parent folder with timestamp to avoid duplicates
-    const timestamp = new Date().toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    // Create an "AI 分类" parent folder with timestamp
+    const timestamp = new Date().toLocaleString('zh-CN', { 
+      month: 'numeric', 
+      day: 'numeric', 
+      hour: '2-digit', 
+      minute: '2-digit' 
+    });
     const aiFolder = await chrome.bookmarks.create({
       parentId: parentId,
-      title: `📁 AI 分类 (${timestamp})`
+      title: `📁 AI分类 ${timestamp}`
     });
 
     let movedCount = 0;
@@ -256,7 +249,7 @@ ${bookmarksInfo}
 
       // Move bookmarks to this folder
       for (const index of indices) {
-        if (index >= 0 && index < bookmarksToProcess.length) {
+        if (typeof index === 'number' && index >= 0 && index < bookmarksToProcess.length) {
           try {
             await chrome.bookmarks.move(bookmarksToProcess[index].id, {
               parentId: categoryFolder.id
@@ -272,14 +265,14 @@ ${bookmarksInfo}
     await updateStats();
     showMessage(`✓ 已整理 ${movedCount} 个书签到 ${Object.keys(categories).length} 个分类`);
   } catch (error) {
-    console.error(error);
+    console.error('Organize error:', error);
     showMessage(error.message, 'error');
   } finally {
     hideLoading();
   }
 });
 
-// Check dead bookmarks using background service worker
+// Check dead bookmarks via background script
 checkDeadBtn.addEventListener('click', async () => {
   showLoading('正在检测失效书签...');
   deadBookmarkIds = [];
@@ -293,43 +286,47 @@ checkDeadBtn.addEventListener('click', async () => {
     const total = httpBookmarks.length;
     let deadCount = 0;
 
-    // Process in batches of 5 for better performance
-    for (let i = 0; i < httpBookmarks.length; i++) {
-      const bookmark = httpBookmarks[i];
+    for (const bookmark of httpBookmarks) {
       checked++;
-      
       if (checked % 3 === 0 || checked === total) {
-        showLoading(`检测中 (${checked}/${total})，发现 ${deadCount} 个失效...`);
+        showLoading(`检测中 (${checked}/${total})...`);
       }
 
-      // Send to background for checking
-      const result = await chrome.runtime.sendMessage({
-        action: 'checkUrl',
-        url: bookmark.url
-      });
+      try {
+        // Send message to background script to check URL
+        const result = await chrome.runtime.sendMessage({
+          action: 'checkUrl',
+          url: bookmark.url
+        });
 
-      if (!result.alive) {
-        deadCount++;
-        deadBookmarkIds.push(bookmark.id);
-        const li = document.createElement('li');
-        const statusText = result.status ? `[${result.status}]` : '[无法访问]';
-        li.innerHTML = `<span class="dead-status">${statusText}</span> <span class="dead-title">${bookmark.title || '无标题'}</span>`;
-        li.title = bookmark.url;
-        deadBookmarksList.appendChild(li);
+        if (!result.alive) {
+          deadBookmarkIds.push(bookmark.id);
+          const li = document.createElement('li');
+          li.innerHTML = `
+            <span class="dead-title">${bookmark.title || '无标题'}</span>
+            <span class="dead-status">${result.status || result.error || '无法访问'}</span>
+            <br><span class="dead-url">${bookmark.url}</span>
+          `;
+          li.title = bookmark.url;
+          deadBookmarksList.appendChild(li);
+          deadCount++;
+        }
+      } catch (error) {
+        console.error('Check error for', bookmark.url, error);
       }
     }
 
-    deadBookmarksEl.textContent = deadBookmarkIds.length;
+    deadBookmarksEl.textContent = deadCount;
 
-    if (deadBookmarkIds.length > 0) {
+    if (deadCount > 0) {
       deadBookmarksSection.style.display = 'block';
-      showMessage(`发现 ${deadBookmarkIds.length} 个失效书签`);
+      showMessage(`发现 ${deadCount} 个失效书签`);
     } else {
       deadBookmarksSection.style.display = 'none';
       showMessage('✓ 所有书签都正常');
     }
   } catch (error) {
-    console.error(error);
+    console.error('Check dead error:', error);
     showMessage(error.message, 'error');
   } finally {
     hideLoading();
@@ -344,9 +341,11 @@ deleteDeadBtn.addEventListener('click', async () => {
     return;
   }
 
+  let deleted = 0;
   for (const id of deadBookmarkIds) {
     try {
       await chrome.bookmarks.remove(id);
+      deleted++;
     } catch (e) {
       console.error('Failed to remove bookmark:', e);
     }
@@ -357,7 +356,7 @@ deleteDeadBtn.addEventListener('click', async () => {
   deadBookmarksSection.style.display = 'none';
   deadBookmarksEl.textContent = '0';
   await updateStats();
-  showMessage('✓ 已删除所有失效书签');
+  showMessage(`✓ 已删除 ${deleted} 个失效书签`);
 });
 
 // Initialize on load
