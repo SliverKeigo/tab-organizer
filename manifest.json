@@ -1,11 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Tab Organizer",
+  "name": "Bookmark Organizer",
   "version": "1.0.0",
-  "description": "AI-powered tab organizer - auto categorize and detect dead tabs",
+  "description": "AI-powered bookmark organizer - auto categorize and detect dead bookmarks",
   "permissions": [
-    "tabs",
-    "tabGroups",
+    "bookmarks",
     "storage"
   ],
   "host_permissions": [

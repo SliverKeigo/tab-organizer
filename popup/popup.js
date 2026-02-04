@@ -9,7 +9,7 @@ async function callGemini(apiKey, prompt) {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 4096,
       }
     })
   });
@@ -29,43 +29,44 @@ async function callGemini(apiKey, prompt) {
   return text;
 }
 
-// Category colors mapping
-const CATEGORY_COLORS = {
-  '工作': 'blue',
-  '技术': 'cyan',
-  '文档': 'purple',
-  '社交': 'pink',
-  '娱乐': 'yellow',
-  '购物': 'orange',
-  '新闻': 'green',
-  '其他': 'grey'
-};
-
-function getCategoryColor(category) {
-  for (const [key, color] of Object.entries(CATEGORY_COLORS)) {
-    if (category.includes(key)) return color;
-  }
-  return 'grey';
-}
-
 // DOM elements
 const apiKeyInput = document.getElementById('api-key');
 const saveKeyBtn = document.getElementById('save-key');
 const keyStatus = document.getElementById('key-status');
-const totalTabsEl = document.getElementById('total-tabs');
-const groupsCountEl = document.getElementById('groups-count');
-const deadTabsEl = document.getElementById('dead-tabs');
+const totalBookmarksEl = document.getElementById('total-bookmarks');
+const foldersCountEl = document.getElementById('folders-count');
+const deadBookmarksEl = document.getElementById('dead-bookmarks');
 const organizeBtn = document.getElementById('organize-btn');
 const checkDeadBtn = document.getElementById('check-dead-btn');
-const ungroupBtn = document.getElementById('ungroup-btn');
-const deadTabsSection = document.getElementById('dead-tabs-section');
-const deadTabsList = document.getElementById('dead-tabs-list');
-const closeDeadBtn = document.getElementById('close-dead-btn');
+const deadBookmarksSection = document.getElementById('dead-bookmarks-section');
+const deadBookmarksList = document.getElementById('dead-bookmarks-list');
+const deleteDeadBtn = document.getElementById('delete-dead-btn');
 const loadingEl = document.getElementById('loading');
 const loadingText = document.getElementById('loading-text');
 const messageEl = document.getElementById('message');
 
-let deadTabIds = [];
+let deadBookmarkIds = [];
+
+// Get all bookmarks recursively
+async function getAllBookmarks() {
+  const tree = await chrome.bookmarks.getTree();
+  const bookmarks = [];
+  const folders = [];
+  
+  function traverse(nodes) {
+    for (const node of nodes) {
+      if (node.url) {
+        bookmarks.push(node);
+      } else if (node.children) {
+        if (node.title) folders.push(node);
+        traverse(node.children);
+      }
+    }
+  }
+  
+  traverse(tree);
+  return { bookmarks, folders };
+}
 
 // Initialize
 async function init() {
@@ -83,11 +84,9 @@ async function init() {
 
 // Update statistics
 async function updateStats() {
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  const groups = await chrome.tabGroups.query({ windowId: chrome.windows.WINDOW_ID_CURRENT });
-  
-  totalTabsEl.textContent = tabs.length;
-  groupsCountEl.textContent = groups.length;
+  const { bookmarks, folders } = await getAllBookmarks();
+  totalBookmarksEl.textContent = bookmarks.length;
+  foldersCountEl.textContent = folders.length;
 }
 
 // Save API key
@@ -129,7 +128,26 @@ function showMessage(text, type = 'success') {
   }, 3000);
 }
 
-// AI Organize tabs
+// Find or create folder
+async function findOrCreateFolder(name, parentId) {
+  // Search for existing folder
+  const results = await chrome.bookmarks.search({ title: name });
+  const existingFolder = results.find(b => !b.url && b.parentId === parentId);
+  
+  if (existingFolder) {
+    return existingFolder.id;
+  }
+  
+  // Create new folder
+  const newFolder = await chrome.bookmarks.create({
+    parentId: parentId,
+    title: name
+  });
+  
+  return newFolder.id;
+}
+
+// AI Organize bookmarks
 organizeBtn.addEventListener('click', async () => {
   const { geminiApiKey } = await chrome.storage.sync.get('geminiApiKey');
   if (!geminiApiKey) {
@@ -137,42 +155,37 @@ organizeBtn.addEventListener('click', async () => {
     return;
   }
 
-  showLoading('正在分析标签...');
+  showLoading('正在获取书签...');
 
   try {
-    // Get all tabs
-    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const { bookmarks } = await getAllBookmarks();
     
-    // Filter out chrome:// and extension pages
-    const validTabs = tabs.filter(tab => 
-      tab.url && 
-      !tab.url.startsWith('chrome://') && 
-      !tab.url.startsWith('chrome-extension://')
-    );
-
-    if (validTabs.length === 0) {
-      showMessage('没有可分组的标签', 'error');
+    if (bookmarks.length === 0) {
+      showMessage('没有书签可以分类', 'error');
       hideLoading();
       return;
     }
 
-    // Prepare tabs info for AI
-    const tabsInfo = validTabs.map((tab, index) => 
-      `${index}. ${tab.title} (${new URL(tab.url).hostname})`
+    // Limit to first 100 bookmarks to avoid token limits
+    const bookmarksToProcess = bookmarks.slice(0, 100);
+    
+    // Prepare bookmarks info for AI
+    const bookmarksInfo = bookmarksToProcess.map((b, index) => 
+      `${index}. ${b.title} (${new URL(b.url).hostname})`
     ).join('\n');
 
-    const prompt = `你是一个标签分类助手。请将以下浏览器标签分类到合适的组中。
+    const prompt = `你是一个书签分类助手。请将以下浏览器书签分类到合适的文件夹中。
 
-标签列表：
-${tabsInfo}
+书签列表：
+${bookmarksInfo}
 
-请返回 JSON 格式，key 是分类名称（简短的中文，如：工作、技术文档、社交、娱乐、购物、新闻、其他），value 是标签索引数组。
+请返回 JSON 格式，key 是分类名称（简短的中文，如：工作、技术文档、社交媒体、娱乐、购物、新闻资讯、学习资源、工具网站、其他），value 是书签索引数组。
 只返回 JSON，不要其他内容。
 
 示例格式：
-{"工作": [0, 3], "技术文档": [1, 2, 5], "娱乐": [4]}`;
+{"技术文档": [0, 3, 5], "社交媒体": [1, 2], "娱乐": [4]}`;
 
-    showLoading('AI 正在分类...');
+    showLoading('AI 正在分析...');
     const result = await callGemini(geminiApiKey, prompt);
     
     // Parse JSON from response
@@ -183,103 +196,106 @@ ${tabsInfo}
 
     const categories = JSON.parse(jsonMatch[0]);
     
-    showLoading('正在创建分组...');
+    showLoading('正在整理书签...');
 
-    // First, ungroup all tabs
-    for (const tab of validTabs) {
-      if (tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-        await chrome.tabs.ungroup(tab.id);
-      }
-    }
+    // Get the "Other Bookmarks" folder (id: "2" is usually "Other Bookmarks")
+    const bookmarkBar = await chrome.bookmarks.get("1"); // Bookmark Bar
+    const parentId = "1"; // Put AI folders in Bookmark Bar
 
-    // Create groups
+    // Create an "AI 分类" parent folder
+    const aiFolder = await chrome.bookmarks.create({
+      parentId: parentId,
+      title: '📁 AI 分类'
+    });
+
+    let movedCount = 0;
+
+    // Create folders and move bookmarks
     for (const [category, indices] of Object.entries(categories)) {
       if (!Array.isArray(indices) || indices.length === 0) continue;
 
-      const tabIds = indices
-        .filter(i => i >= 0 && i < validTabs.length)
-        .map(i => validTabs[i].id);
-
-      if (tabIds.length === 0) continue;
-
-      const groupId = await chrome.tabs.group({ tabIds });
-      await chrome.tabGroups.update(groupId, {
-        title: category,
-        color: getCategoryColor(category)
+      // Create category folder
+      const categoryFolder = await chrome.bookmarks.create({
+        parentId: aiFolder.id,
+        title: category
       });
-    }
 
-    await updateStats();
-    showMessage(`✓ 已创建 ${Object.keys(categories).length} 个分组`);
-  } catch (error) {
-    console.error(error);
-    showMessage(error.message, 'error');
-  } finally {
-    hideLoading();
-  }
-});
-
-// Check dead tabs
-checkDeadBtn.addEventListener('click', async () => {
-  showLoading('正在检测失效标签...');
-  deadTabIds = [];
-  deadTabsList.innerHTML = '';
-
-  try {
-    const tabs = await chrome.tabs.query({ currentWindow: true });
-    const validTabs = tabs.filter(tab => 
-      tab.url && 
-      tab.url.startsWith('http')
-    );
-
-    let checked = 0;
-    const total = validTabs.length;
-
-    for (const tab of validTabs) {
-      checked++;
-      showLoading(`检测中 (${checked}/${total})...`);
-
-      // Check if tab has error status by looking at its properties
-      // and try to detect common error patterns in title
-      const errorPatterns = [
-        /^404/i,
-        /not found/i,
-        /page not found/i,
-        /无法访问/i,
-        /无法找到/i,
-        /err_/i,
-        /找不到网页/i,
-        /this site can't be reached/i,
-        /unable to connect/i,
-        /connection refused/i,
-        /server not found/i,
-        /dns_probe/i,
-        /网页无法加载/i
-      ];
-
-      const titleLower = (tab.title || '').toLowerCase();
-      const isErrorPage = errorPatterns.some(pattern => pattern.test(tab.title || ''));
-      
-      // Also check if title equals URL (often indicates failed load)
-      const titleIsUrl = tab.title === tab.url;
-      
-      if (isErrorPage || titleIsUrl) {
-        deadTabIds.push(tab.id);
-        const li = document.createElement('li');
-        li.textContent = tab.title || tab.url;
-        li.title = tab.url;
-        deadTabsList.appendChild(li);
+      // Move bookmarks to this folder
+      for (const index of indices) {
+        if (index >= 0 && index < bookmarksToProcess.length) {
+          try {
+            await chrome.bookmarks.move(bookmarksToProcess[index].id, {
+              parentId: categoryFolder.id
+            });
+            movedCount++;
+          } catch (e) {
+            console.error('Failed to move bookmark:', e);
+          }
+        }
       }
     }
 
-    deadTabsEl.textContent = deadTabIds.length;
+    await updateStats();
+    showMessage(`✓ 已整理 ${movedCount} 个书签到 ${Object.keys(categories).length} 个分类`);
+  } catch (error) {
+    console.error(error);
+    showMessage(error.message, 'error');
+  } finally {
+    hideLoading();
+  }
+});
 
-    if (deadTabIds.length > 0) {
-      deadTabsSection.style.display = 'block';
-      showMessage(`发现 ${deadTabIds.length} 个可能失效的标签`);
+// Check dead bookmarks
+checkDeadBtn.addEventListener('click', async () => {
+  showLoading('正在检测失效书签...');
+  deadBookmarkIds = [];
+  deadBookmarksList.innerHTML = '';
+
+  try {
+    const { bookmarks } = await getAllBookmarks();
+    const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
+
+    let checked = 0;
+    const total = httpBookmarks.length;
+
+    for (const bookmark of httpBookmarks) {
+      checked++;
+      if (checked % 5 === 0) {
+        showLoading(`检测中 (${checked}/${total})...`);
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+        const response = await fetch(bookmark.url, {
+          method: 'HEAD',
+          mode: 'no-cors',
+          signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+        
+        // no-cors mode: if fetch succeeds, link is probably alive
+        // only catch block means it's dead
+      } catch (error) {
+        // Bookmark is dead or unreachable
+        deadBookmarkIds.push(bookmark.id);
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="dead-title">${bookmark.title || '无标题'}</span><br><span class="dead-url">${bookmark.url}</span>`;
+        li.title = bookmark.url;
+        deadBookmarksList.appendChild(li);
+      }
+    }
+
+    deadBookmarksEl.textContent = deadBookmarkIds.length;
+
+    if (deadBookmarkIds.length > 0) {
+      deadBookmarksSection.style.display = 'block';
+      showMessage(`发现 ${deadBookmarkIds.length} 个失效书签`);
     } else {
-      deadTabsSection.style.display = 'none';
-      showMessage('✓ 未发现明显失效的标签');
+      deadBookmarksSection.style.display = 'none';
+      showMessage('✓ 所有书签都正常');
     }
   } catch (error) {
     console.error(error);
@@ -289,31 +305,28 @@ checkDeadBtn.addEventListener('click', async () => {
   }
 });
 
-// Close dead tabs
-closeDeadBtn.addEventListener('click', async () => {
-  if (deadTabIds.length === 0) return;
+// Delete dead bookmarks
+deleteDeadBtn.addEventListener('click', async () => {
+  if (deadBookmarkIds.length === 0) return;
 
-  await chrome.tabs.remove(deadTabIds);
-  deadTabIds = [];
-  deadTabsList.innerHTML = '';
-  deadTabsSection.style.display = 'none';
-  deadTabsEl.textContent = '0';
-  await updateStats();
-  showMessage('✓ 已关闭所有失效标签');
-});
+  if (!confirm(`确定要删除 ${deadBookmarkIds.length} 个失效书签吗？此操作不可撤销！`)) {
+    return;
+  }
 
-// Ungroup all tabs
-ungroupBtn.addEventListener('click', async () => {
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  
-  for (const tab of tabs) {
-    if (tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-      await chrome.tabs.ungroup(tab.id);
+  for (const id of deadBookmarkIds) {
+    try {
+      await chrome.bookmarks.remove(id);
+    } catch (e) {
+      console.error('Failed to remove bookmark:', e);
     }
   }
 
+  deadBookmarkIds = [];
+  deadBookmarksList.innerHTML = '';
+  deadBookmarksSection.style.display = 'none';
+  deadBookmarksEl.textContent = '0';
   await updateStats();
-  showMessage('✓ 已取消所有分组');
+  showMessage('✓ 已删除所有失效书签');
 });
 
 // Initialize on load

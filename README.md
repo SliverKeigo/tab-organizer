@@ -1,12 +1,12 @@
-# Tab Organizer
+# Bookmark Organizer
 
-🗂️ AI 智能标签管理 Chrome 扩展
+🔖 AI 智能书签管理 Chrome 扩展
 
 ## 功能
 
-- **AI 智能分组** - 使用 Gemini AI 自动分析标签内容并分类
-- **检测失效标签** - 扫描并找出无法访问的网页
-- **一键取消分组** - 快速恢复原始状态
+- **AI 智能分类** - 使用 Gemini AI 自动分析书签并整理到文件夹
+- **检测失效书签** - 扫描并找出无法访问的链接
+- **一键删除失效** - 快速清理死链接
 
 ## 安装
 
@@ -19,18 +19,19 @@
 
 1. 点击扩展图标打开面板
 2. 输入你的 Gemini API Key（[获取地址](https://aistudio.google.com/apikey)）
-3. 点击「AI 智能分组」自动整理标签
-4. 点击「检测失效标签」找出无效链接
+3. 点击「AI 智能分类」自动整理书签
+4. 点击「检测失效书签」找出死链接
 
 ## 技术栈
 
 - Chrome Extension Manifest V3
-- Gemini 2.0 Flash API
+- Gemini 2.5 Flash API
+- Chrome Bookmarks API
 - Vanilla JavaScript
 
 ## TODO
 
 - [ ] 自定义分类规则
-- [ ] 定时自动检测失效标签
-- [ ] 导出/导入标签列表
-- [ ] 历史记录功能
+- [ ] 定时自动检测失效书签
+- [ ] 导出/导入书签列表
+- [ ] 书签去重功能
