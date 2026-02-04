@@ -8,8 +8,9 @@ async function callGemini(apiKey, prompt) {
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.2,
+        temperature: 0.1,
         maxOutputTokens: 4096,
+        responseMimeType: 'application/json'
       }
     })
   });
@@ -27,6 +28,31 @@ async function callGemini(apiKey, prompt) {
   }
 
   return text;
+}
+
+// Parse JSON from AI response (handles markdown code blocks)
+function parseJsonResponse(text) {
+  // Try to extract JSON from markdown code block
+  let jsonStr = text;
+  
+  // Remove markdown code blocks if present
+  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    jsonStr = codeBlockMatch[1].trim();
+  }
+  
+  // Try to find JSON object
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    jsonStr = jsonMatch[0];
+  }
+  
+  try {
+    return JSON.parse(jsonStr);
+  } catch (e) {
+    console.error('JSON parse error:', e, 'Text:', text);
+    throw new Error('无法解析 AI 返回结果，请重试');
+  }
 }
 
 // DOM elements
@@ -128,25 +154,6 @@ function showMessage(text, type = 'success') {
   }, 3000);
 }
 
-// Find or create folder
-async function findOrCreateFolder(name, parentId) {
-  // Search for existing folder
-  const results = await chrome.bookmarks.search({ title: name });
-  const existingFolder = results.find(b => !b.url && b.parentId === parentId);
-  
-  if (existingFolder) {
-    return existingFolder.id;
-  }
-  
-  // Create new folder
-  const newFolder = await chrome.bookmarks.create({
-    parentId: parentId,
-    title: name
-  });
-  
-  return newFolder.id;
-}
-
 // AI Organize bookmarks
 organizeBtn.addEventListener('click', async () => {
   const { geminiApiKey } = await chrome.storage.sync.get('geminiApiKey');
@@ -170,42 +177,46 @@ organizeBtn.addEventListener('click', async () => {
     const bookmarksToProcess = bookmarks.slice(0, 100);
     
     // Prepare bookmarks info for AI
-    const bookmarksInfo = bookmarksToProcess.map((b, index) => 
-      `${index}. ${b.title} (${new URL(b.url).hostname})`
-    ).join('\n');
+    const bookmarksInfo = bookmarksToProcess.map((b, index) => {
+      try {
+        const hostname = new URL(b.url).hostname;
+        return `${index}. ${b.title || '无标题'} (${hostname})`;
+      } catch {
+        return `${index}. ${b.title || '无标题'} (${b.url})`;
+      }
+    }).join('\n');
 
-    const prompt = `你是一个书签分类助手。请将以下浏览器书签分类到合适的文件夹中。
+    const prompt = `将以下书签分类，返回 JSON 格式。
 
 书签列表：
 ${bookmarksInfo}
 
-请返回 JSON 格式，key 是分类名称（简短的中文，如：工作、技术文档、社交媒体、娱乐、购物、新闻资讯、学习资源、工具网站、其他），value 是书签索引数组。
-只返回 JSON，不要其他内容。
+分类规则：
+- key: 分类名（中文，如：技术文档、社交媒体、娱乐、购物、工具网站、其他）
+- value: 书签索引数组
 
-示例格式：
-{"技术文档": [0, 3, 5], "社交媒体": [1, 2], "娱乐": [4]}`;
+只返回 JSON 对象，不要任何解释。`;
 
     showLoading('AI 正在分析...');
     const result = await callGemini(geminiApiKey, prompt);
     
     // Parse JSON from response
-    const jsonMatch = result.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('无法解析 AI 返回结果');
+    const categories = parseJsonResponse(result);
+    
+    if (!categories || typeof categories !== 'object') {
+      throw new Error('AI 返回格式不正确');
     }
-
-    const categories = JSON.parse(jsonMatch[0]);
     
     showLoading('正在整理书签...');
 
-    // Get the "Other Bookmarks" folder (id: "2" is usually "Other Bookmarks")
-    const bookmarkBar = await chrome.bookmarks.get("1"); // Bookmark Bar
-    const parentId = "1"; // Put AI folders in Bookmark Bar
+    // Put AI folders in Bookmark Bar (id: "1")
+    const parentId = "1";
 
-    // Create an "AI 分类" parent folder
+    // Create an "AI 分类" parent folder with timestamp to avoid duplicates
+    const timestamp = new Date().toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const aiFolder = await chrome.bookmarks.create({
       parentId: parentId,
-      title: '📁 AI 分类'
+      title: `📁 AI 分类 (${timestamp})`
     });
 
     let movedCount = 0;
@@ -245,7 +256,7 @@ ${bookmarksInfo}
   }
 });
 
-// Check dead bookmarks - uses background service worker for CORS-free requests
+// Check dead bookmarks using background service worker
 checkDeadBtn.addEventListener('click', async () => {
   showLoading('正在检测失效书签...');
   deadBookmarkIds = [];
@@ -259,32 +270,37 @@ checkDeadBtn.addEventListener('click', async () => {
     const total = httpBookmarks.length;
     let deadCount = 0;
 
-    for (const bookmark of httpBookmarks) {
+    // Process in batches of 5 for better performance
+    for (let i = 0; i < httpBookmarks.length; i++) {
+      const bookmark = httpBookmarks[i];
       checked++;
-      showLoading(`检测中 (${checked}/${total})...`);
+      
+      if (checked % 3 === 0 || checked === total) {
+        showLoading(`检测中 (${checked}/${total})，发现 ${deadCount} 个失效...`);
+      }
 
-      // Send to background for CORS-free check
+      // Send to background for checking
       const result = await chrome.runtime.sendMessage({
         action: 'checkUrl',
         url: bookmark.url
       });
 
       if (!result.alive) {
-        deadBookmarkIds.push(bookmark.id);
         deadCount++;
+        deadBookmarkIds.push(bookmark.id);
         const li = document.createElement('li');
-        const statusText = result.status ? `HTTP ${result.status}` : (result.error || '无法访问');
-        li.innerHTML = `<span class="dead-title">${bookmark.title || '无标题'}</span> <span class="dead-status">[${statusText}]</span><br><span class="dead-url">${bookmark.url}</span>`;
+        const statusText = result.status ? `[${result.status}]` : '[无法访问]';
+        li.innerHTML = `<span class="dead-status">${statusText}</span> <span class="dead-title">${bookmark.title || '无标题'}</span>`;
         li.title = bookmark.url;
         deadBookmarksList.appendChild(li);
       }
     }
 
-    deadBookmarksEl.textContent = deadCount;
+    deadBookmarksEl.textContent = deadBookmarkIds.length;
 
-    if (deadCount > 0) {
+    if (deadBookmarkIds.length > 0) {
       deadBookmarksSection.style.display = 'block';
-      showMessage(`发现 ${deadCount} 个失效书签`);
+      showMessage(`发现 ${deadBookmarkIds.length} 个失效书签`);
     } else {
       deadBookmarksSection.style.display = 'none';
       showMessage('✓ 所有书签都正常');
