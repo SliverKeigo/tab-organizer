@@ -245,7 +245,7 @@ ${bookmarksInfo}
   }
 });
 
-// Check dead bookmarks
+// Check dead bookmarks - uses background service worker for CORS-free requests
 checkDeadBtn.addEventListener('click', async () => {
   showLoading('正在检测失效书签...');
   deadBookmarkIds = [];
@@ -257,42 +257,34 @@ checkDeadBtn.addEventListener('click', async () => {
 
     let checked = 0;
     const total = httpBookmarks.length;
+    let deadCount = 0;
 
     for (const bookmark of httpBookmarks) {
       checked++;
-      if (checked % 5 === 0) {
-        showLoading(`检测中 (${checked}/${total})...`);
-      }
+      showLoading(`检测中 (${checked}/${total})...`);
 
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
+      // Send to background for CORS-free check
+      const result = await chrome.runtime.sendMessage({
+        action: 'checkUrl',
+        url: bookmark.url
+      });
 
-        const response = await fetch(bookmark.url, {
-          method: 'HEAD',
-          mode: 'no-cors',
-          signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-        
-        // no-cors mode: if fetch succeeds, link is probably alive
-        // only catch block means it's dead
-      } catch (error) {
-        // Bookmark is dead or unreachable
+      if (!result.alive) {
         deadBookmarkIds.push(bookmark.id);
+        deadCount++;
         const li = document.createElement('li');
-        li.innerHTML = `<span class="dead-title">${bookmark.title || '无标题'}</span><br><span class="dead-url">${bookmark.url}</span>`;
+        const statusText = result.status ? `HTTP ${result.status}` : (result.error || '无法访问');
+        li.innerHTML = `<span class="dead-title">${bookmark.title || '无标题'}</span> <span class="dead-status">[${statusText}]</span><br><span class="dead-url">${bookmark.url}</span>`;
         li.title = bookmark.url;
         deadBookmarksList.appendChild(li);
       }
     }
 
-    deadBookmarksEl.textContent = deadBookmarkIds.length;
+    deadBookmarksEl.textContent = deadCount;
 
-    if (deadBookmarkIds.length > 0) {
+    if (deadCount > 0) {
       deadBookmarksSection.style.display = 'block';
-      showMessage(`发现 ${deadBookmarkIds.length} 个失效书签`);
+      showMessage(`发现 ${deadCount} 个失效书签`);
     } else {
       deadBookmarksSection.style.display = 'none';
       showMessage('✓ 所有书签都正常');
