@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tab Organizer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🗂️ Tab Organizer</h1>
+      <p class="subtitle">AI 智能标签管理</p>
+    </header>
+
+    <!-- 设置区域 -->
+    <div class="settings-section" id="settings-section">
+      <div class="setting-item">
+        <label for="api-key">Gemini API Key</label>
+        <input type="password" id="api-key" placeholder="输入你的 API Key">
+        <button id="save-key" class="btn-small">保存</button>
+      </div>
+      <div class="status" id="key-status"></div>
+    </div>
+
+    <!-- 统计信息 -->
+    <div class="stats">
+      <div class="stat-item">
+        <span class="stat-number" id="total-tabs">0</span>
+        <span class="stat-label">标签总数</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-number" id="groups-count">0</span>
+        <span class="stat-label">分组数</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-number" id="dead-tabs">0</span>
+        <span class="stat-label">失效标签</span>
+      </div>
+    </div>
+
+    <!-- 操作按钮 -->
+    <div class="actions">
+      <button id="organize-btn" class="btn btn-primary">
+        <span class="btn-icon">🤖</span>
+        AI 智能分组
+      </button>
+      <button id="check-dead-btn" class="btn btn-secondary">
+        <span class="btn-icon">🔍</span>
+        检测失效标签
+      </button>
+      <button id="ungroup-btn" class="btn btn-outline">
+        <span class="btn-icon">📂</span>
+        取消所有分组
+      </button>
+    </div>
+
+    <!-- 失效标签列表 -->
+    <div class="dead-tabs-section" id="dead-tabs-section" style="display: none;">
+      <h3>失效标签</h3>
+      <ul id="dead-tabs-list"></ul>
+      <button id="close-dead-btn" class="btn btn-danger">关闭所有失效标签</button>
+    </div>
+
+    <!-- 加载状态 -->
+    <div class="loading" id="loading" style="display: none;">
+      <div class="spinner"></div>
+      <span id="loading-text">处理中...</span>
+    </div>
+
+    <!-- 消息提示 -->
+    <div class="message" id="message" style="display: none;"></div>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
