@@ -32,26 +32,49 @@ async function callGemini(apiKey, prompt) {
 
 // Parse JSON from AI response (handles markdown code blocks)
 function parseJsonResponse(text) {
-  // Try to extract JSON from markdown code block
-  let jsonStr = text;
+  console.log('AI Raw Response:', text);
+  
+  let jsonStr = text.trim();
   
   // Remove markdown code blocks if present
-  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (codeBlockMatch) {
     jsonStr = codeBlockMatch[1].trim();
   }
   
-  // Try to find JSON object
+  // Try to find JSON object pattern
   const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     jsonStr = jsonMatch[0];
   }
   
+  // Clean up common issues
+  jsonStr = jsonStr
+    .replace(/,\s*}/g, '}')  // Remove trailing commas
+    .replace(/,\s*]/g, ']'); // Remove trailing commas in arrays
+  
+  console.log('Cleaned JSON:', jsonStr);
+  
   try {
-    return JSON.parse(jsonStr);
+    const parsed = JSON.parse(jsonStr);
+    console.log('Parsed result:', parsed);
+    return parsed;
   } catch (e) {
-    console.error('JSON parse error:', e, 'Text:', text);
-    throw new Error('无法解析 AI 返回结果，请重试');
+    console.error('JSON parse error:', e);
+    console.error('Failed text:', jsonStr);
+    
+    // Last resort: try to eval as object (risky but sometimes works)
+    try {
+      // Very basic attempt - only if it looks safe
+      if (jsonStr.startsWith('{') && jsonStr.endsWith('}')) {
+        const fn = new Function('return ' + jsonStr);
+        return fn();
+      }
+    } catch (e2) {
+      console.error('Fallback parse also failed:', e2);
+    }
+    
+    throw new Error('无法解析 AI 返回结果');
   }
 }
 
