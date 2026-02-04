@@ -1,5 +1,5 @@
 // Gemini API helper
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 async function callGemini(apiKey, prompt) {
   const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
@@ -239,22 +239,31 @@ checkDeadBtn.addEventListener('click', async () => {
       checked++;
       showLoading(`检测中 (${checked}/${total})...`);
 
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+      // Check if tab has error status by looking at its properties
+      // and try to detect common error patterns in title
+      const errorPatterns = [
+        /^404/i,
+        /not found/i,
+        /page not found/i,
+        /无法访问/i,
+        /无法找到/i,
+        /err_/i,
+        /找不到网页/i,
+        /this site can't be reached/i,
+        /unable to connect/i,
+        /connection refused/i,
+        /server not found/i,
+        /dns_probe/i,
+        /网页无法加载/i
+      ];
 
-        const response = await fetch(tab.url, {
-          method: 'HEAD',
-          mode: 'no-cors',
-          signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
-
-        // In no-cors mode, we can't check status, so we skip
-        // Only truly dead tabs will throw errors
-      } catch (error) {
-        // Tab is dead or unreachable
+      const titleLower = (tab.title || '').toLowerCase();
+      const isErrorPage = errorPatterns.some(pattern => pattern.test(tab.title || ''));
+      
+      // Also check if title equals URL (often indicates failed load)
+      const titleIsUrl = tab.title === tab.url;
+      
+      if (isErrorPage || titleIsUrl) {
         deadTabIds.push(tab.id);
         const li = document.createElement('li');
         li.textContent = tab.title || tab.url;
@@ -267,10 +276,10 @@ checkDeadBtn.addEventListener('click', async () => {
 
     if (deadTabIds.length > 0) {
       deadTabsSection.style.display = 'block';
-      showMessage(`发现 ${deadTabIds.length} 个失效标签`);
+      showMessage(`发现 ${deadTabIds.length} 个可能失效的标签`);
     } else {
       deadTabsSection.style.display = 'none';
-      showMessage('✓ 所有标签都正常');
+      showMessage('✓ 未发现明显失效的标签');
     }
   } catch (error) {
     console.error(error);
