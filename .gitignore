@@ -1,2 +1,5 @@
 .DS_Store
 bookmarks_*.html
+dist/
+node_modules/
+bookmark-organizer.zip
