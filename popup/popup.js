@@ -93,6 +93,102 @@ function buildCategorySummaries(assignments, bookmarks, sampleLimit = 6) {
   return Array.from(summaries.values());
 }
 
+function normalizeUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const hostname = url.hostname.toLowerCase();
+    let pathname = url.pathname || '/';
+    if (pathname.length > 1) {
+      pathname = pathname.replace(/\/+$/, '');
+    }
+    return `${url.protocol}//${hostname}${pathname}${url.search}`;
+  } catch {
+    return rawUrl.trim();
+  }
+}
+
+async function getDuplicateBookmarks() {
+  const { bookmarks } = await getAllBookmarks();
+  const seen = new Map();
+  const duplicates = [];
+
+  for (const bookmark of bookmarks) {
+    if (!bookmark.url) continue;
+    const key = normalizeUrl(bookmark.url);
+    if (seen.has(key)) {
+      duplicates.push(bookmark);
+    } else {
+      seen.set(key, bookmark);
+    }
+  }
+
+  return duplicates;
+}
+
+function sanitizeExportNode(node) {
+  const sanitized = {
+    title: node.title || '',
+    url: node.url || null
+  };
+
+  if (node.children && node.children.length > 0) {
+    sanitized.children = node.children.map(child => sanitizeExportNode(child));
+  }
+
+  return sanitized;
+}
+
+async function exportBookmarks() {
+  const tree = await chrome.bookmarks.getTree();
+  const rootChildren = tree?.[0]?.children || [];
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    tree: rootChildren.map(node => sanitizeExportNode(node))
+  };
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `bookmarks-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importBookmarks(nodes, parentId) {
+  for (const node of nodes) {
+    if (node.url) {
+      try {
+        await chrome.bookmarks.create({
+          parentId,
+          title: node.title || '',
+          url: node.url
+        });
+      } catch (error) {
+        console.error('Failed to import bookmark:', node, error);
+      }
+    } else {
+      try {
+        const folder = await chrome.bookmarks.create({
+          parentId,
+          title: node.title || '未命名文件夹'
+        });
+        if (node.children && node.children.length > 0) {
+          await importBookmarks(node.children, folder.id);
+        }
+      } catch (error) {
+        console.error('Failed to import folder:', node, error);
+      }
+    }
+  }
+}
+
+function extractImportNodes(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.tree)) return payload.tree;
+  return null;
+}
+
 function buildSortPrompt(summaries) {
   const categoryNames = summaries.map(summary => summary.name);
   const lines = summaries
@@ -420,6 +516,7 @@ const apiBaseInput = document.getElementById('api-base');
 const apiModelInput = document.getElementById('api-model');
 const autoDeleteCheckbox = document.getElementById('auto-delete');
 const cleanupBeforeCheckbox = document.getElementById('cleanup-before');
+const strictCheckCheckbox = document.getElementById('strict-check');
 const aiSortCheckbox = document.getElementById('ai-sort');
 const resetStructureCheckbox = document.getElementById('reset-structure');
 const flatCategoriesCheckbox = document.getElementById('flat-categories');
@@ -436,6 +533,10 @@ const checkDeadBtn = document.getElementById('check-dead-btn');
 const deadBookmarksSection = document.getElementById('dead-bookmarks-section');
 const deadBookmarksList = document.getElementById('dead-bookmarks-list');
 const deleteDeadBtn = document.getElementById('delete-dead-btn');
+const exportBtn = document.getElementById('export-btn');
+const importBtn = document.getElementById('import-btn');
+const importFileInput = document.getElementById('import-file');
+const dedupeBtn = document.getElementById('dedupe-btn');
 const loadingEl = document.getElementById('loading');
 const loadingText = document.getElementById('loading-text');
 const messageEl = document.getElementById('message');
@@ -472,6 +573,7 @@ async function init() {
     'apiModel',
     'autoDeleteDead',
     'cleanupBeforeOrganize',
+    'strictDeadCheck',
     'aiSortCategories',
     'resetBeforeOrganize',
     'flatCategories',
@@ -488,6 +590,7 @@ async function init() {
   apiModelInput.value = stored.apiModel || defaults.model;
   autoDeleteCheckbox.checked = stored.autoDeleteDead ?? true;
   cleanupBeforeCheckbox.checked = stored.cleanupBeforeOrganize ?? false;
+  strictCheckCheckbox.checked = stored.strictDeadCheck ?? false;
   aiSortCheckbox.checked = stored.aiSortCategories ?? true;
   resetStructureCheckbox.checked = stored.resetBeforeOrganize ?? true;
   flatCategoriesCheckbox.checked = stored.flatCategories ?? true;
@@ -526,6 +629,7 @@ saveKeyBtn.addEventListener('click', async () => {
     apiModel: config.model,
     autoDeleteDead: autoDeleteCheckbox.checked,
     cleanupBeforeOrganize: cleanupBeforeCheckbox.checked,
+    strictDeadCheck: strictCheckCheckbox.checked,
     aiSortCategories: aiSortCheckbox.checked,
     resetBeforeOrganize: resetStructureCheckbox.checked,
     flatCategories: flatCategoriesCheckbox.checked,
@@ -602,7 +706,7 @@ async function deleteDeadBookmarks({ confirmDelete } = { confirmDelete: true }) 
   return { deleted, failed };
 }
 
-async function detectDeadBookmarks({ showProgress = true, listDead = false } = {}) {
+async function detectDeadBookmarks({ showProgress = true, listDead = false, strictCheck = false } = {}) {
   deadBookmarkIds = [];
   if (listDead) {
     deadBookmarksList.innerHTML = '';
@@ -621,7 +725,8 @@ async function detectDeadBookmarks({ showProgress = true, listDead = false } = {
     const results = await Promise.allSettled(
       chunk.map(bookmark => chrome.runtime.sendMessage({
         action: 'checkUrl',
-        url: bookmark.url
+        url: bookmark.url,
+        strict: strictCheck
       }))
     );
 
@@ -659,9 +764,9 @@ async function detectDeadBookmarks({ showProgress = true, listDead = false } = {
   return { deadCount, total };
 }
 
-async function scanAndDeleteDeadBookmarks({ showProgress = true } = {}) {
+async function scanAndDeleteDeadBookmarks({ showProgress = true, strictCheck = false } = {}) {
   try {
-    await detectDeadBookmarks({ showProgress, listDead: false });
+    await detectDeadBookmarks({ showProgress, listDead: false, strictCheck });
     const { deleted, failed } = await deleteDeadBookmarks({ confirmDelete: false });
     return { deleted, failed };
   } finally {
@@ -686,7 +791,10 @@ organizeBtn.addEventListener('click', async () => {
   try {
     if (cleanupBeforeCheckbox.checked) {
       showLoading('分类前清理失效书签...');
-      const { deleted, failed } = await scanAndDeleteDeadBookmarks({ showProgress: true });
+      const { deleted, failed } = await scanAndDeleteDeadBookmarks({
+        showProgress: true,
+        strictCheck: strictCheckCheckbox.checked
+      });
       if (failed > 0) {
         showMessage(`清理完成：删除 ${deleted} 个，失败 ${failed} 个`, 'error');
       } else if (deleted > 0) {
@@ -1007,7 +1115,11 @@ checkDeadBtn.addEventListener('click', async () => {
 
   try {
     const shouldListDead = !autoDeleteCheckbox.checked;
-    const { deadCount } = await detectDeadBookmarks({ showProgress: true, listDead: shouldListDead });
+    const { deadCount } = await detectDeadBookmarks({
+      showProgress: true,
+      listDead: shouldListDead,
+      strictCheck: strictCheckCheckbox.checked
+    });
 
     deadBookmarksEl.textContent = deadCount;
 
@@ -1044,6 +1156,97 @@ deleteDeadBtn.addEventListener('click', async () => {
     showMessage(`已删除 ${deleted} 个，${failed} 个删除失败`, 'error');
   } else {
     showMessage(`✓ 已删除 ${deleted} 个失效书签`);
+  }
+});
+
+exportBtn.addEventListener('click', async () => {
+  showLoading('正在导出书签...');
+  try {
+    await exportBookmarks();
+    showMessage('✓ 已导出书签');
+  } catch (error) {
+    console.error('Export error:', error);
+    showMessage(error.message || '导出失败', 'error');
+  } finally {
+    hideLoading();
+  }
+});
+
+importBtn.addEventListener('click', () => {
+  importFileInput.click();
+});
+
+importFileInput.addEventListener('change', async () => {
+  const file = importFileInput.files?.[0];
+  if (!file) return;
+
+  showLoading('正在导入书签...');
+  try {
+    const content = await file.text();
+    const payload = JSON.parse(content);
+    const nodes = extractImportNodes(payload);
+    if (!nodes) {
+      throw new Error('导入文件格式不正确');
+    }
+
+    if (!confirm('将导入书签到书签栏下的新文件夹，是否继续？')) {
+      return;
+    }
+
+    const timestamp = new Date().toLocaleString('zh-CN', { 
+      month: 'numeric', 
+      day: 'numeric', 
+      hour: '2-digit', 
+      minute: '2-digit' 
+    });
+    const parentId = '1';
+    const folder = await chrome.bookmarks.create({
+      parentId,
+      title: `导入 ${timestamp}`
+    });
+
+    await importBookmarks(nodes, folder.id);
+    await updateStats();
+    showMessage('✓ 导入完成');
+  } catch (error) {
+    console.error('Import error:', error);
+    showMessage(error.message || '导入失败', 'error');
+  } finally {
+    importFileInput.value = '';
+    hideLoading();
+  }
+});
+
+dedupeBtn.addEventListener('click', async () => {
+  showLoading('正在查找重复书签...');
+  try {
+    const duplicates = await getDuplicateBookmarks();
+    if (duplicates.length === 0) {
+      showMessage('没有发现重复书签');
+      return;
+    }
+
+    if (!confirm(`发现 ${duplicates.length} 个重复书签，是否删除？`)) {
+      return;
+    }
+
+    let deleted = 0;
+    for (const bookmark of duplicates) {
+      try {
+        await chrome.bookmarks.remove(bookmark.id);
+        deleted++;
+      } catch (error) {
+        console.error('Failed to remove duplicate:', bookmark, error);
+      }
+    }
+
+    await updateStats();
+    showMessage(`✓ 已删除 ${deleted} 个重复书签`);
+  } catch (error) {
+    console.error('Dedupe error:', error);
+    showMessage(error.message || '去重失败', 'error');
+  } finally {
+    hideLoading();
   }
 });
 

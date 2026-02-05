@@ -39,6 +39,10 @@
         <input type="checkbox" id="cleanup-before">
       </div>
       <div class="setting-item">
+        <label for="strict-check">严格检测</label>
+        <input type="checkbox" id="strict-check">
+      </div>
+      <div class="setting-item">
         <label for="ai-sort">AI 排序</label>
         <input type="checkbox" id="ai-sort">
       </div>
@@ -92,6 +96,14 @@
         <span class="btn-icon">🔍</span>
         检测失效书签
       </button>
+    </div>
+
+    <!-- 工具 -->
+    <div class="tools">
+      <button id="export-btn" class="btn btn-outline">导出书签 (JSON)</button>
+      <button id="import-btn" class="btn btn-outline">导入书签 (JSON)</button>
+      <input type="file" id="import-file" accept="application/json" class="file-input">
+      <button id="dedupe-btn" class="btn btn-outline">书签去重</button>
     </div>
 
     <!-- 失效书签列表 -->

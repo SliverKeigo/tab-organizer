@@ -3,7 +3,7 @@
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'checkUrl') {
-    checkUrl(request.url)
+    checkUrl(request.url, request.strict)
       .then(result => sendResponse(result))
       .catch(error => sendResponse({ alive: false, error: error.message }));
     return true; // Keep the message channel open for async response
@@ -29,11 +29,19 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 // Check if a URL is alive
-async function checkUrl(url) {
+async function checkUrl(url, strict = false) {
   try {
-    let response = await fetchWithTimeout(url, { method: 'HEAD' });
+    let response;
 
-    if (response.status === 405 || response.status === 403) {
+    try {
+      response = await fetchWithTimeout(url, { method: 'HEAD' });
+    } catch (error) {
+      if (!strict) {
+        throw error;
+      }
+    }
+
+    if (!response || strict || response.status === 405 || response.status === 403) {
       response = await fetchWithTimeout(url, {
         method: 'GET',
         headers: { Range: 'bytes=0-0' }
