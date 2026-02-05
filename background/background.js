@@ -10,19 +10,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+const REQUEST_TIMEOUT_MS = 10000;
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      redirect: 'follow',
+      ...options,
+      signal: controller.signal
+    });
+    return response;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // Check if a URL is alive
 async function checkUrl(url) {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    let response = await fetchWithTimeout(url, { method: 'HEAD' });
 
-    const response = await fetch(url, {
-      method: 'HEAD',
-      signal: controller.signal,
-      redirect: 'follow'
-    });
-
-    clearTimeout(timeoutId);
+    if (response.status === 405 || response.status === 403) {
+      response = await fetchWithTimeout(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' }
+      });
+    }
 
     // Check status code
     if (response.status >= 400) {
