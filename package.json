@@ -2,7 +2,12 @@
   "name": "bookmark-organizer",
   "private": true,
   "type": "module",
+  "devDependencies": {
+    "javascript-obfuscator": "^4.1.1"
+  },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "build": "node scripts/build.js",
+    "zip": "node scripts/build.js && (cd dist && zip -r ../bookmark-organizer.zip .)"
   }
 }
