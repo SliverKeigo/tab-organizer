@@ -107,6 +107,14 @@ function normalizeUrl(rawUrl) {
   }
 }
 
+function getOtherBookmarks(assignments, bookmarks) {
+  return bookmarks.filter(bookmark => {
+    const entry = assignments.get(bookmark.id);
+    const category = entry?.full || '其他';
+    return category === '其他';
+  });
+}
+
 async function getDuplicateBookmarks() {
   const { bookmarks } = await getAllBookmarks();
   const seen = new Map();
@@ -518,6 +526,7 @@ const autoDeleteCheckbox = document.getElementById('auto-delete');
 const cleanupBeforeCheckbox = document.getElementById('cleanup-before');
 const strictCheckCheckbox = document.getElementById('strict-check');
 const aiSortCheckbox = document.getElementById('ai-sort');
+const reviewOtherCheckbox = document.getElementById('review-other');
 const resetStructureCheckbox = document.getElementById('reset-structure');
 const flatCategoriesCheckbox = document.getElementById('flat-categories');
 const maxCategoriesInput = document.getElementById('max-categories');
@@ -575,6 +584,7 @@ async function init() {
     'cleanupBeforeOrganize',
     'strictDeadCheck',
     'aiSortCategories',
+    'reviewOtherCategories',
     'resetBeforeOrganize',
     'flatCategories',
     'maxCategories',
@@ -592,6 +602,7 @@ async function init() {
   cleanupBeforeCheckbox.checked = stored.cleanupBeforeOrganize ?? false;
   strictCheckCheckbox.checked = stored.strictDeadCheck ?? false;
   aiSortCheckbox.checked = stored.aiSortCategories ?? true;
+  reviewOtherCheckbox.checked = stored.reviewOtherCategories ?? true;
   resetStructureCheckbox.checked = stored.resetBeforeOrganize ?? true;
   flatCategoriesCheckbox.checked = stored.flatCategories ?? true;
   maxCategoriesInput.value = stored.maxCategories ?? 12;
@@ -631,6 +642,7 @@ saveKeyBtn.addEventListener('click', async () => {
     cleanupBeforeOrganize: cleanupBeforeCheckbox.checked,
     strictDeadCheck: strictCheckCheckbox.checked,
     aiSortCategories: aiSortCheckbox.checked,
+    reviewOtherCategories: reviewOtherCheckbox.checked,
     resetBeforeOrganize: resetStructureCheckbox.checked,
     flatCategories: flatCategoriesCheckbox.checked,
     maxCategories: Number(maxCategoriesInput.value) || 0,
@@ -1025,6 +1037,66 @@ organizeBtn.addEventListener('click', async () => {
                   }
                 }
               }
+            }
+          }
+        }
+      }
+    }
+
+    if (reviewOtherCheckbox.checked) {
+      const existingCategories = Array.from(new Set(
+        Array.from(assignments.values())
+          .map(entry => entry.full)
+          .filter(category => category && category !== '其他')
+      ));
+
+      if (existingCategories.length > 0) {
+        const reviewTargets = getOtherBookmarks(assignments, bookmarks);
+        if (reviewTargets.length > 0) {
+          showLoading('正在复查“其他”...');
+          const reviewBatches = chunkArray(reviewTargets, BOOKMARKS_PER_BATCH);
+          const reviewCategoryList = [...existingCategories, '其他'];
+
+          for (let reviewIndex = 0; reviewIndex < reviewBatches.length; reviewIndex++) {
+            const batch = reviewBatches[reviewIndex];
+            const batchLabel = `${reviewIndex + 1}/${reviewBatches.length}`;
+
+            try {
+              const info = buildBookmarksInfo(batch);
+              const prompt = buildPrompt(info, {
+                categoryList: reviewCategoryList,
+                maxCategories: 0,
+                flatCategories
+              });
+
+              showLoading(`复查“其他” (${batchLabel})...`);
+              const result = await callModel(config, prompt);
+              const categories = parseJsonResponse(result);
+              if (!categories || typeof categories !== 'object' || Object.keys(categories).length === 0) {
+                continue;
+              }
+
+              const normalized = normalizeCategories(categories, {
+                categoryList: reviewCategoryList,
+                maxCategories: 0,
+                flatCategories
+              });
+
+              for (const [category, indexSet] of normalized.entries()) {
+                for (const index of indexSet) {
+                  if (typeof index === 'number' && index >= 0 && index < batch.length) {
+                    const bookmark = batch[index];
+                    if (bookmark) {
+                      const pathSegments = splitCategoryPath(category);
+                      const fullCategory = pathSegments.join('/') || '其他';
+                      const topCategory = pathSegments[0] || '其他';
+                      assignments.set(bookmark.id, { full: fullCategory, top: topCategory });
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('Review other error:', error);
             }
           }
         }
