@@ -412,6 +412,7 @@ async function callModel(config, prompt) {
 }
 
 const BOOKMARKS_PER_BATCH = 50;
+const CHECK_CONCURRENCY = 100;
 
 // DOM elements
 const apiProviderSelect = document.getElementById('api-provider');
@@ -601,36 +602,66 @@ async function deleteDeadBookmarks({ confirmDelete } = { confirmDelete: true }) 
   return { deleted, failed };
 }
 
-async function scanAndDeleteDeadBookmarks({ showProgress = true } = {}) {
+async function detectDeadBookmarks({ showProgress = true, listDead = false } = {}) {
   deadBookmarkIds = [];
+  if (listDead) {
+    deadBookmarksList.innerHTML = '';
+  }
 
-  try {
-    const { bookmarks } = await getAllBookmarks();
-    const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
+  const { bookmarks } = await getAllBookmarks();
+  const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
 
-    let checked = 0;
-    const total = httpBookmarks.length;
+  let checked = 0;
+  const total = httpBookmarks.length;
+  let deadCount = 0;
 
-    for (const bookmark of httpBookmarks) {
-      checked++;
-      if (showProgress && (checked % 3 === 0 || checked === total)) {
-        showLoading(`检测失效书签 (${checked}/${total})...`);
-      }
+  for (let i = 0; i < httpBookmarks.length; i += CHECK_CONCURRENCY) {
+    const chunk = httpBookmarks.slice(i, i + CHECK_CONCURRENCY);
 
-      try {
-        const result = await chrome.runtime.sendMessage({
-          action: 'checkUrl',
-          url: bookmark.url
-        });
+    const results = await Promise.allSettled(
+      chunk.map(bookmark => chrome.runtime.sendMessage({
+        action: 'checkUrl',
+        url: bookmark.url
+      }))
+    );
 
-        if (!result.alive) {
+    results.forEach((result, index) => {
+      const bookmark = chunk[index];
+      if (!bookmark) return;
+
+      if (result.status === 'fulfilled') {
+        const checkResult = result.value;
+        if (!checkResult.alive) {
           deadBookmarkIds.push(bookmark.id);
+          if (listDead) {
+            const li = document.createElement('li');
+            li.innerHTML = `
+              <span class="dead-title">${bookmark.title || '无标题'}</span>
+              <span class="dead-status">${checkResult.status || checkResult.error || '无法访问'}</span>
+              <br><span class="dead-url">${bookmark.url}</span>
+            `;
+            li.title = bookmark.url;
+            deadBookmarksList.appendChild(li);
+          }
+          deadCount++;
         }
-      } catch (error) {
-        console.error('Check error for', bookmark.url, error);
+      } else {
+        console.error('Check error for', bookmark.url, result.reason);
       }
-    }
+    });
 
+    checked += chunk.length;
+    if (showProgress && total > 0) {
+      showLoading(`检测中 (${checked}/${total})...`);
+    }
+  }
+
+  return { deadCount, total };
+}
+
+async function scanAndDeleteDeadBookmarks({ showProgress = true } = {}) {
+  try {
+    await detectDeadBookmarks({ showProgress, listDead: false });
     const { deleted, failed } = await deleteDeadBookmarks({ confirmDelete: false });
     return { deleted, failed };
   } finally {
@@ -975,45 +1006,8 @@ checkDeadBtn.addEventListener('click', async () => {
   deadBookmarksSection.style.display = 'none';
 
   try {
-    const { bookmarks } = await getAllBookmarks();
-    const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
     const shouldListDead = !autoDeleteCheckbox.checked;
-
-    let checked = 0;
-    const total = httpBookmarks.length;
-    let deadCount = 0;
-
-    for (const bookmark of httpBookmarks) {
-      checked++;
-      if (checked % 3 === 0 || checked === total) {
-        showLoading(`检测中 (${checked}/${total})...`);
-      }
-
-      try {
-        // Send message to background script to check URL
-        const result = await chrome.runtime.sendMessage({
-          action: 'checkUrl',
-          url: bookmark.url
-        });
-
-        if (!result.alive) {
-          deadBookmarkIds.push(bookmark.id);
-          if (shouldListDead) {
-            const li = document.createElement('li');
-            li.innerHTML = `
-              <span class="dead-title">${bookmark.title || '无标题'}</span>
-              <span class="dead-status">${result.status || result.error || '无法访问'}</span>
-              <br><span class="dead-url">${bookmark.url}</span>
-            `;
-            li.title = bookmark.url;
-            deadBookmarksList.appendChild(li);
-          }
-          deadCount++;
-        }
-      } catch (error) {
-        console.error('Check error for', bookmark.url, error);
-      }
-    }
+    const { deadCount } = await detectDeadBookmarks({ showProgress: true, listDead: shouldListDead });
 
     deadBookmarksEl.textContent = deadCount;
 
