@@ -1,69 +1,429 @@
+import { buildBookmarksInfo, buildPrompt, chunkArray, parseJsonResponse } from './ai-utils.js';
+
 // Gemini API helper
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+const DEFAULTS = {
+  gemini: {
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    model: 'gemini-2.5-flash'
+  },
+  openai: {
+    baseUrl: 'http://127.0.0.1:2223/v1',
+    model: 'local-model'
+  }
+};
 
-async function callGemini(apiKey, prompt) {
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 4096
+const RATE_LIMIT_STATUS = new Set([429, 503]);
+
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeBaseUrl(url) {
+  return url.replace(/\/+$/, '');
+}
+
+function getDefaults(provider) {
+  return DEFAULTS[provider] ?? DEFAULTS.gemini;
+}
+
+function getConfigFromInputs() {
+  const provider = apiProviderSelect.value;
+  const defaults = getDefaults(provider);
+  const baseUrl = normalizeBaseUrl(apiBaseInput.value.trim() || defaults.baseUrl);
+  const model = apiModelInput.value.trim() || defaults.model;
+  const apiKey = apiKeyInput.value.trim();
+  return { provider, baseUrl, model, apiKey };
+}
+
+function normalizeCategoryName(category) {
+  return String(category ?? '')
+    .replace(/[\\／]/g, '/')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function splitCategoryPath(category) {
+  const normalized = normalizeCategoryName(category);
+  if (!normalized) return [];
+  return normalized.split('/').map(part => part.trim()).filter(Boolean);
+}
+
+function parseCategoryList(input) {
+  if (!input) return [];
+  const parts = input
+    .split(/[\n,，;；]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  const unique = [];
+  for (const part of parts) {
+    if (!unique.includes(part)) {
+      unique.push(part);
+    }
+  }
+  return unique;
+}
+
+function buildCategorySummaries(assignments, bookmarks, sampleLimit = 6) {
+  const summaries = new Map();
+
+  for (const bookmark of bookmarks) {
+    const entry = assignments.get(bookmark.id);
+    const category = entry?.top || '其他';
+    if (!summaries.has(category)) {
+      summaries.set(category, { name: category, count: 0, samples: [] });
+    }
+    const data = summaries.get(category);
+    data.count += 1;
+
+    if (data.samples.length < sampleLimit) {
+      const title = bookmark.title || '无标题';
+      let sample = title;
+      if (bookmark.url) {
+        try {
+          const hostname = new URL(bookmark.url).hostname;
+          sample = `${title} (${hostname})`;
+        } catch {
+          sample = title;
+        }
       }
-    })
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error?.message || 'API 调用失败');
+      data.samples.push(sample);
+    }
   }
 
-  const data = await response.json();
-  console.log('Gemini raw response:', data);
-  
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  
-  if (!text) {
-    throw new Error('API 返回为空');
-  }
-
-  console.log('Gemini text:', text);
-  return text;
+  return Array.from(summaries.values());
 }
 
-// Parse JSON from AI response (handles markdown code blocks and various formats)
-function parseJsonResponse(text) {
-  console.log('Parsing response:', text);
-  
-  let jsonStr = text.trim();
-  
-  // Remove markdown code blocks if present
-  const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (codeBlockMatch) {
-    jsonStr = codeBlockMatch[1].trim();
+function buildSortPrompt(summaries) {
+  const categoryNames = summaries.map(summary => summary.name);
+  const lines = summaries
+    .map(summary => `- ${summary.name} (${summary.count})：${summary.samples.join('；')}`)
+    .join('\n');
+
+  return `你是书签文件夹排序助手。请根据书签内容推断常用程度与通用性，给出分类排序。\n\n分类及示例：\n${lines}\n\n规则：\n1. 仅使用以下分类名，不要新增或遗漏：${categoryNames.join('、')}\n2. 返回 JSON 数组，按从常用到不常用排序，例如：["工具","技术","娱乐"]\n3. 游戏、临时、内网穿透、签到等偏不常用类别请靠后\n4. 如果无法判断，按数量多的排前\n\n只返回 JSON 数组，不要其他内容。`;
+}
+
+async function reorderTopLevelCategories(parentId, orderedNames, categorySet, cache, placeAfterNonCategories) {
+  const children = await getChildrenCached(parentId, cache);
+  const seen = new Set();
+  const nameToNode = new Map();
+
+  for (const child of children) {
+    if (!child.url && categorySet.has(child.title)) {
+      nameToNode.set(child.title, child);
+    }
   }
-  
-  // Try to find JSON object - handle nested braces properly
-  const startIndex = jsonStr.indexOf('{');
-  const endIndex = jsonStr.lastIndexOf('}');
-  
-  if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
-    jsonStr = jsonStr.substring(startIndex, endIndex + 1);
+
+  const orderedNodes = [];
+  for (const name of orderedNames) {
+    const node = nameToNode.get(name);
+    if (node && !seen.has(name)) {
+      orderedNodes.push(node);
+      seen.add(name);
+    }
   }
-  
-  try {
-    const result = JSON.parse(jsonStr);
-    console.log('Parsed result:', result);
-    return result;
-  } catch (e) {
-    console.error('JSON parse error:', e);
-    console.error('Failed to parse:', jsonStr);
-    throw new Error(`无法解析 AI 返回结果: ${e.message}`);
+
+  for (const child of children) {
+    if (!child.url && categorySet.has(child.title) && !seen.has(child.title)) {
+      orderedNodes.push(child);
+      seen.add(child.title);
+    }
+  }
+
+  if (orderedNodes.length === 0) return;
+
+  const nonCategoryCount = placeAfterNonCategories
+    ? children.filter(child => !categorySet.has(child.title)).length
+    : 0;
+
+  for (let i = 0; i < orderedNodes.length; i++) {
+    try {
+      await chrome.bookmarks.move(orderedNodes[i].id, {
+        parentId,
+        index: nonCategoryCount + i
+      });
+    } catch (error) {
+      console.error('Failed to reorder folder:', orderedNodes[i], error);
+    }
   }
 }
+
+function normalizeCategories(categories, options) {
+  const { categoryList = [], flatCategories = false, maxCategories = 0 } = options;
+  const allowedSet = categoryList.length ? new Set(categoryList) : null;
+  const fallback = allowedSet?.has('其他')
+    ? '其他'
+    : (categoryList[0] || '其他');
+
+  const normalizedMap = new Map();
+
+  for (const [category, indices] of Object.entries(categories)) {
+    if (!Array.isArray(indices) || indices.length === 0) continue;
+
+    let pathSegments = splitCategoryPath(category);
+    if (pathSegments.length === 0) {
+      pathSegments = [fallback];
+    }
+
+    let name = '';
+    if (allowedSet) {
+      const top = allowedSet.has(pathSegments[0]) ? pathSegments[0] : fallback;
+      if (flatCategories) {
+        name = top;
+      } else {
+        name = [top, ...pathSegments.slice(1)].join('/');
+      }
+    } else {
+      name = flatCategories ? pathSegments[0] : pathSegments.join('/');
+    }
+
+    const finalName = name || fallback;
+    if (!normalizedMap.has(finalName)) {
+      normalizedMap.set(finalName, new Set());
+    }
+    const set = normalizedMap.get(finalName);
+    for (const index of indices) {
+      if (typeof index === 'number') {
+        set.add(index);
+      }
+    }
+  }
+
+  const limit = Number.isFinite(maxCategories) ? Math.floor(maxCategories) : 0;
+  if (limit > 0 && normalizedMap.size > limit) {
+    const counts = Array.from(normalizedMap.entries())
+      .map(([name, set]) => [name, set.size])
+      .sort((a, b) => b[1] - a[1]);
+
+    let keepNames = new Set(counts.slice(0, limit).map(([name]) => name));
+    if (!keepNames.has(fallback) && normalizedMap.size > limit) {
+      keepNames = new Set(counts.slice(0, Math.max(limit - 1, 0)).map(([name]) => name));
+      keepNames.add(fallback);
+    }
+
+    if (!normalizedMap.has(fallback)) {
+      normalizedMap.set(fallback, new Set());
+    }
+
+    for (const [name, set] of normalizedMap.entries()) {
+      if (!keepNames.has(name)) {
+        const fallbackSet = normalizedMap.get(fallback);
+        for (const index of set) {
+          fallbackSet.add(index);
+        }
+        normalizedMap.delete(name);
+      }
+    }
+  }
+
+  return normalizedMap;
+}
+
+async function getChildrenCached(parentId, cache) {
+  if (cache.has(parentId)) {
+    return cache.get(parentId);
+  }
+  const children = await chrome.bookmarks.getChildren(parentId);
+  cache.set(parentId, children);
+  return children;
+}
+
+async function findOrCreateFolder(parentId, title, cache) {
+  const children = await getChildrenCached(parentId, cache);
+  const existing = children.find(child => !child.url && child.title === title);
+  if (existing) {
+    return existing;
+  }
+  const created = await chrome.bookmarks.create({ parentId, title });
+  children.push(created);
+  return created;
+}
+
+async function moveBookmarksToFolder(bookmarks, folderId) {
+  for (const bookmark of bookmarks) {
+    try {
+      await chrome.bookmarks.move(bookmark.id, { parentId: folderId });
+    } catch (error) {
+      console.error('Failed to move bookmark:', bookmark, error);
+    }
+  }
+}
+
+async function removeFoldersExcept(keepFolderIds) {
+  const tree = await chrome.bookmarks.getTree();
+  const rootIds = new Set(['0', '1', '2', '3']);
+
+  async function removeNodes(nodes) {
+    for (const node of nodes) {
+      if (keepFolderIds.has(node.id)) {
+        continue;
+      }
+      if (node.children) {
+        if (rootIds.has(node.id)) {
+          await removeNodes(node.children);
+        } else {
+          try {
+            await chrome.bookmarks.removeTree(node.id);
+          } catch (error) {
+            console.error('Failed to remove folder:', node, error);
+          }
+        }
+      }
+    }
+  }
+
+  await removeNodes(tree);
+}
+
+async function moveRemainingFromBackup(tempFolderId, parentId, cache) {
+  if (!tempFolderId) return 0;
+  const children = await chrome.bookmarks.getChildren(tempFolderId);
+  if (!children || children.length === 0) return 0;
+
+  const otherFolder = await findOrCreateFolder(parentId, '其他', cache);
+  let moved = 0;
+  for (const child of children) {
+    try {
+      await chrome.bookmarks.move(child.id, { parentId: otherFolder.id });
+      moved++;
+    } catch (error) {
+      console.error('Failed to move backup child:', child, error);
+    }
+  }
+  return moved;
+}
+
+function getOpenAiEndpoint(baseUrl) {
+  if (/\/(chat\/completions|completions|responses)$/.test(baseUrl)) {
+    return baseUrl;
+  }
+  return `${baseUrl}/chat/completions`;
+}
+
+async function callGemini({ apiKey, baseUrl, model }, prompt) {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const url = `${normalizeBaseUrl(baseUrl)}/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 4096
+        }
+      })
+    });
+
+    if (!response.ok) {
+      let errorMessage = 'API 调用失败';
+      try {
+        const error = await response.json();
+        errorMessage = error.error?.message || errorMessage;
+      } catch {
+        // ignore parse error
+      }
+
+      const shouldRetry = RATE_LIMIT_STATUS.has(response.status);
+      if (shouldRetry && attempt < maxAttempts) {
+        await sleep(800 * attempt);
+        continue;
+      }
+
+      if (/quota|rate limit/i.test(errorMessage)) {
+        throw new Error('Gemini 配额或速率限制已用尽，请检查方案/计费或稍后重试');
+      }
+
+      throw new Error(errorMessage);
+    }
+
+    const data = await response.json();
+    console.log('Gemini raw response:', data);
+    
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (!text) {
+      throw new Error('API 返回为空');
+    }
+
+    console.log('Gemini text:', text);
+    return text;
+  }
+}
+
+async function callOpenAi({ apiKey, baseUrl, model }, prompt) {
+  const maxAttempts = 3;
+  const url = getOpenAiEndpoint(normalizeBaseUrl(baseUrl));
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1,
+        max_tokens: 4096
+      })
+    });
+
+    if (!response.ok) {
+      let errorMessage = 'API 调用失败';
+      try {
+        const error = await response.json();
+        errorMessage = error.error?.message || errorMessage;
+      } catch {
+        // ignore parse error
+      }
+
+      const shouldRetry = RATE_LIMIT_STATUS.has(response.status);
+      if (shouldRetry && attempt < maxAttempts) {
+        await sleep(800 * attempt);
+        continue;
+      }
+
+      throw new Error(errorMessage);
+    }
+
+    const data = await response.json();
+    console.log('OpenAI raw response:', data);
+
+    const text = data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text;
+    if (!text) {
+      throw new Error('API 返回为空');
+    }
+
+    console.log('OpenAI text:', text);
+    return text;
+  }
+}
+
+async function callModel(config, prompt) {
+  if (config.provider === 'openai') {
+    return callOpenAi(config, prompt);
+  }
+  return callGemini(config, prompt);
+}
+
+const BOOKMARKS_PER_BATCH = 50;
 
 // DOM elements
+const apiProviderSelect = document.getElementById('api-provider');
+const apiBaseInput = document.getElementById('api-base');
+const apiModelInput = document.getElementById('api-model');
+const autoDeleteCheckbox = document.getElementById('auto-delete');
+const cleanupBeforeCheckbox = document.getElementById('cleanup-before');
+const aiSortCheckbox = document.getElementById('ai-sort');
+const resetStructureCheckbox = document.getElementById('reset-structure');
+const flatCategoriesCheckbox = document.getElementById('flat-categories');
+const maxCategoriesInput = document.getElementById('max-categories');
+const customCategoriesInput = document.getElementById('custom-categories');
 const apiKeyInput = document.getElementById('api-key');
 const saveKeyBtn = document.getElementById('save-key');
 const keyStatus = document.getElementById('key-status');
@@ -104,11 +464,38 @@ async function getAllBookmarks() {
 
 // Initialize
 async function init() {
-  // Load saved API key
-  const { geminiApiKey } = await chrome.storage.sync.get('geminiApiKey');
-  if (geminiApiKey) {
-    apiKeyInput.value = geminiApiKey;
-    keyStatus.textContent = '✓ API Key 已保存';
+  // Load saved API settings
+  const stored = await chrome.storage.sync.get([
+    'apiProvider',
+    'apiBaseUrl',
+    'apiModel',
+    'autoDeleteDead',
+    'cleanupBeforeOrganize',
+    'aiSortCategories',
+    'resetBeforeOrganize',
+    'flatCategories',
+    'maxCategories',
+    'customCategories',
+    'apiKey',
+    'geminiApiKey'
+  ]);
+
+  const provider = stored.apiProvider || 'gemini';
+  const defaults = getDefaults(provider);
+  apiProviderSelect.value = provider;
+  apiBaseInput.value = stored.apiBaseUrl || defaults.baseUrl;
+  apiModelInput.value = stored.apiModel || defaults.model;
+  autoDeleteCheckbox.checked = stored.autoDeleteDead ?? true;
+  cleanupBeforeCheckbox.checked = stored.cleanupBeforeOrganize ?? false;
+  aiSortCheckbox.checked = stored.aiSortCategories ?? true;
+  resetStructureCheckbox.checked = stored.resetBeforeOrganize ?? true;
+  flatCategoriesCheckbox.checked = stored.flatCategories ?? true;
+  maxCategoriesInput.value = stored.maxCategories ?? 12;
+  customCategoriesInput.value = stored.customCategories || '';
+  apiKeyInput.value = stored.apiKey || stored.geminiApiKey || '';
+
+  if (apiKeyInput.value) {
+    keyStatus.textContent = '✓ 设置已加载';
     keyStatus.className = 'status success';
   }
 
@@ -125,16 +512,39 @@ async function updateStats() {
 
 // Save API key
 saveKeyBtn.addEventListener('click', async () => {
-  const apiKey = apiKeyInput.value.trim();
-  if (!apiKey) {
-    keyStatus.textContent = '请输入 API Key';
+  const config = getConfigFromInputs();
+  if (!config.baseUrl || !config.model) {
+    keyStatus.textContent = '请填写 API Base 和 Model';
     keyStatus.className = 'status error';
     return;
   }
 
-  await chrome.storage.sync.set({ geminiApiKey: apiKey });
-  keyStatus.textContent = '✓ API Key 已保存';
+  await chrome.storage.sync.set({
+    apiProvider: config.provider,
+    apiBaseUrl: config.baseUrl,
+    apiModel: config.model,
+    autoDeleteDead: autoDeleteCheckbox.checked,
+    cleanupBeforeOrganize: cleanupBeforeCheckbox.checked,
+    aiSortCategories: aiSortCheckbox.checked,
+    resetBeforeOrganize: resetStructureCheckbox.checked,
+    flatCategories: flatCategoriesCheckbox.checked,
+    maxCategories: Number(maxCategoriesInput.value) || 0,
+    customCategories: customCategoriesInput.value.trim(),
+    apiKey: config.apiKey
+  });
+
+  keyStatus.textContent = '✓ 设置已保存';
   keyStatus.className = 'status success';
+});
+
+apiProviderSelect.addEventListener('change', () => {
+  const defaults = getDefaults(apiProviderSelect.value);
+  if (!apiBaseInput.value.trim()) {
+    apiBaseInput.value = defaults.baseUrl;
+  }
+  if (!apiModelInput.value.trim()) {
+    apiModelInput.value = defaults.model;
+  }
 });
 
 // Show loading
@@ -162,17 +572,97 @@ function showMessage(text, type = 'success') {
   }, 5000);
 }
 
+async function deleteDeadBookmarks({ confirmDelete } = { confirmDelete: true }) {
+  if (deadBookmarkIds.length === 0) return { deleted: 0, failed: 0 };
+
+  if (confirmDelete) {
+    if (!confirm(`确定要删除 ${deadBookmarkIds.length} 个失效书签吗？此操作不可撤销！`)) {
+      return { deleted: 0, failed: 0 };
+    }
+  }
+
+  let deleted = 0;
+  let failed = 0;
+  for (const id of deadBookmarkIds) {
+    try {
+      await chrome.bookmarks.remove(id);
+      deleted++;
+    } catch (e) {
+      failed++;
+      console.error('Failed to remove bookmark:', e);
+    }
+  }
+
+  deadBookmarkIds = [];
+  deadBookmarksList.innerHTML = '';
+  deadBookmarksSection.style.display = 'none';
+  deadBookmarksEl.textContent = '0';
+  await updateStats();
+  return { deleted, failed };
+}
+
+async function scanAndDeleteDeadBookmarks({ showProgress = true } = {}) {
+  deadBookmarkIds = [];
+
+  try {
+    const { bookmarks } = await getAllBookmarks();
+    const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
+
+    let checked = 0;
+    const total = httpBookmarks.length;
+
+    for (const bookmark of httpBookmarks) {
+      checked++;
+      if (showProgress && (checked % 3 === 0 || checked === total)) {
+        showLoading(`检测失效书签 (${checked}/${total})...`);
+      }
+
+      try {
+        const result = await chrome.runtime.sendMessage({
+          action: 'checkUrl',
+          url: bookmark.url
+        });
+
+        if (!result.alive) {
+          deadBookmarkIds.push(bookmark.id);
+        }
+      } catch (error) {
+        console.error('Check error for', bookmark.url, error);
+      }
+    }
+
+    const { deleted, failed } = await deleteDeadBookmarks({ confirmDelete: false });
+    return { deleted, failed };
+  } finally {
+    deadBookmarkIds = [];
+  }
+}
+
 // AI Organize bookmarks
 organizeBtn.addEventListener('click', async () => {
-  const { geminiApiKey } = await chrome.storage.sync.get('geminiApiKey');
-  if (!geminiApiKey) {
-    showMessage('请先设置 API Key', 'error');
+  const config = getConfigFromInputs();
+  if (config.provider === 'gemini' && !config.apiKey) {
+    showMessage('请先设置 Gemini API Key', 'error');
+    return;
+  }
+  if (!config.baseUrl || !config.model) {
+    showMessage('请先设置 API Base 和 Model', 'error');
     return;
   }
 
   showLoading('正在获取书签...');
 
   try {
+    if (cleanupBeforeCheckbox.checked) {
+      showLoading('分类前清理失效书签...');
+      const { deleted, failed } = await scanAndDeleteDeadBookmarks({ showProgress: true });
+      if (failed > 0) {
+        showMessage(`清理完成：删除 ${deleted} 个，失败 ${failed} 个`, 'error');
+      } else if (deleted > 0) {
+        showMessage(`清理完成：已删除 ${deleted} 个失效书签`);
+      }
+    }
+
     const { bookmarks } = await getAllBookmarks();
     
     if (bookmarks.length === 0) {
@@ -181,92 +671,297 @@ organizeBtn.addEventListener('click', async () => {
       return;
     }
 
-    // Limit to first 50 bookmarks to avoid token limits
-    const bookmarksToProcess = bookmarks.slice(0, 50);
-    
-    // Prepare bookmarks info for AI
-    const bookmarksInfo = bookmarksToProcess.map((b, index) => {
-      try {
-        const hostname = new URL(b.url).hostname;
-        return `${index}. ${b.title || '无标题'} (${hostname})`;
-      } catch {
-        return `${index}. ${b.title || '无标题'}`;
-      }
-    }).join('\n');
-
-    const prompt = `你是一个书签分类助手。请将以下书签分类。
-
-书签：
-${bookmarksInfo}
-
-请返回一个JSON对象，格式如下：
-{"分类名1": [索引数组], "分类名2": [索引数组]}
-
-例如：
-{"技术": [0, 2, 5], "娱乐": [1, 3], "购物": [4]}
-
-分类名用中文，如：技术、社交、娱乐、购物、新闻、工具、其他
-只返回JSON，不要其他内容。`;
-
-    showLoading('AI 正在分析...');
-    const result = await callGemini(geminiApiKey, prompt);
-    
-    // Parse JSON from response
-    const categories = parseJsonResponse(result);
-    
-    if (!categories || typeof categories !== 'object' || Object.keys(categories).length === 0) {
-      throw new Error('AI 返回格式不正确，请重试');
-    }
-    
-    showLoading('正在整理书签...');
+    const batches = chunkArray(bookmarks, BOOKMARKS_PER_BATCH);
+    const categoryList = parseCategoryList(customCategoriesInput.value);
+    const maxCategories = Number(maxCategoriesInput.value) || 0;
+    const flatCategories = flatCategoriesCheckbox.checked;
 
     // Put AI folders in Bookmark Bar (id: "1")
     const parentId = "1";
+    const shouldReset = resetStructureCheckbox.checked;
+    let tempFolderId = null;
+    let tempFolderTitle = null;
+    let resetCompleted = false;
 
-    // Create an "AI 分类" parent folder with timestamp
-    const timestamp = new Date().toLocaleString('zh-CN', { 
-      month: 'numeric', 
-      day: 'numeric', 
-      hour: '2-digit', 
-      minute: '2-digit' 
-    });
-    const aiFolder = await chrome.bookmarks.create({
-      parentId: parentId,
-      title: `📁 AI分类 ${timestamp}`
-    });
+    if (shouldReset) {
+      const confirmReset = confirm('将会清空现有书签文件夹结构，并重新分类所有书签。是否继续？');
+      if (!confirmReset) {
+        hideLoading();
+        return;
+      }
+
+      const timestamp = new Date().toLocaleString('zh-CN', { 
+        month: 'numeric', 
+        day: 'numeric', 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      });
+      tempFolderTitle = `AI_备份_${timestamp}`;
+
+      showLoading('正在备份书签...');
+      const tempFolder = await chrome.bookmarks.create({
+        parentId,
+        title: tempFolderTitle
+      });
+      tempFolderId = tempFolder.id;
+      await moveBookmarksToFolder(bookmarks, tempFolderId);
+
+      showLoading('正在清空原有分类...');
+      await removeFoldersExcept(new Set([tempFolderId]));
+    }
 
     let movedCount = 0;
+    const folderCache = new Map();
+    const usedCategoryPaths = new Set();
+    const batchPlans = [];
+    const globalCategoryCounts = new Map();
 
-    // Create folders and move bookmarks
-    for (const [category, indices] of Object.entries(categories)) {
-      if (!Array.isArray(indices) || indices.length === 0) continue;
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const bookmarksToProcess = batches[batchIndex];
+      const batchLabel = `${batchIndex + 1}/${batches.length}`;
 
-      // Create category folder
-      const categoryFolder = await chrome.bookmarks.create({
-        parentId: aiFolder.id,
-        title: category
-      });
+      try {
+        const bookmarksInfo = buildBookmarksInfo(bookmarksToProcess);
+        const prompt = buildPrompt(bookmarksInfo, {
+          categoryList,
+          maxCategories,
+          flatCategories
+        });
 
-      // Move bookmarks to this folder
-      for (const index of indices) {
-        if (typeof index === 'number' && index >= 0 && index < bookmarksToProcess.length) {
-          try {
-            await chrome.bookmarks.move(bookmarksToProcess[index].id, {
-              parentId: categoryFolder.id
-            });
-            movedCount++;
-          } catch (e) {
-            console.error('Failed to move bookmark:', e);
+        showLoading(`AI 正在分析 (${batchLabel})...`);
+        const result = await callModel(config, prompt);
+
+        const categories = parseJsonResponse(result);
+        if (!categories || typeof categories !== 'object' || Object.keys(categories).length === 0) {
+          throw new Error('AI 返回格式不正确，请重试');
+        }
+
+        showLoading(`正在整理书签 (${batchLabel})...`);
+
+        const normalizedCategories = normalizeCategories(categories, {
+          categoryList,
+          maxCategories: 0,
+          flatCategories
+        });
+
+        for (const [category, indexSet] of normalizedCategories.entries()) {
+          const current = globalCategoryCounts.get(category) || 0;
+          globalCategoryCounts.set(category, current + indexSet.size);
+        }
+
+        batchPlans.push({ bookmarks: bookmarksToProcess, categories: normalizedCategories });
+      } catch (error) {
+        throw new Error(`第 ${batchLabel} 批处理失败：${error.message}`);
+      }
+    }
+
+    let allowedCategories = null;
+    if (categoryList.length > 0) {
+      allowedCategories = new Set(categoryList);
+    } else if (maxCategories > 0) {
+      const sorted = Array.from(globalCategoryCounts.entries())
+        .sort((a, b) => b[1] - a[1]);
+      const topNames = sorted.slice(0, maxCategories).map(([name]) => name);
+      if (!topNames.includes('其他')) {
+        if (topNames.length >= maxCategories) {
+          topNames[topNames.length - 1] = '其他';
+        } else {
+          topNames.push('其他');
+        }
+      }
+      allowedCategories = new Set(topNames);
+    }
+
+    const assignments = new Map();
+    const categoryCounts = new Map();
+    const otherBookmarks = [];
+
+    for (const plan of batchPlans) {
+      for (const [category, indexSet] of plan.categories.entries()) {
+        let finalCategory = category;
+        if (allowedCategories && !allowedCategories.has(finalCategory)) {
+          finalCategory = '其他';
+        }
+
+        const indices = Array.from(indexSet);
+        if (indices.length === 0) continue;
+
+        for (const index of indices) {
+          if (typeof index === 'number' && index >= 0 && index < plan.bookmarks.length) {
+            const bookmark = plan.bookmarks[index];
+            if (!bookmark) continue;
+            const pathSegments = splitCategoryPath(finalCategory);
+            const fullCategory = pathSegments.join('/') || '其他';
+            const topCategory = pathSegments[0] || '其他';
+            assignments.set(bookmark.id, { full: fullCategory, top: topCategory });
+            categoryCounts.set(fullCategory, (categoryCounts.get(fullCategory) || 0) + 1);
+            if (fullCategory === '其他') {
+              otherBookmarks.push(bookmark);
+            }
           }
         }
       }
     }
 
+    let promotedCategory = null;
+
+    if (maxCategories > 0 && categoryList.length === 0 && otherBookmarks.length > 0 && allowedCategories?.has('其他')) {
+      showLoading('正在细分“其他”...');
+      const otherBatches = chunkArray(otherBookmarks, BOOKMARKS_PER_BATCH);
+      const otherCategoryCounts = new Map();
+      const otherPlans = [];
+
+      for (let otherIndex = 0; otherIndex < otherBatches.length; otherIndex++) {
+        const otherBatch = otherBatches[otherIndex];
+        const otherLabel = `${otherIndex + 1}/${otherBatches.length}`;
+        try {
+          const otherInfo = buildBookmarksInfo(otherBatch);
+          const otherPrompt = buildPrompt(otherInfo, {
+            maxCategories: Math.min(6, maxCategories),
+            flatCategories
+          });
+          showLoading(`细分“其他” (${otherLabel})...`);
+          const otherResult = await callModel(config, otherPrompt);
+          const otherCategories = parseJsonResponse(otherResult);
+          if (!otherCategories || typeof otherCategories !== 'object' || Object.keys(otherCategories).length === 0) {
+            throw new Error('AI 返回格式不正确，请重试');
+          }
+          const normalizedOther = normalizeCategories(otherCategories, {
+            maxCategories: 0,
+            flatCategories
+          });
+
+          for (const [category, indexSet] of normalizedOther.entries()) {
+            const current = otherCategoryCounts.get(category) || 0;
+            otherCategoryCounts.set(category, current + indexSet.size);
+          }
+
+          otherPlans.push({ bookmarks: otherBatch, categories: normalizedOther });
+        } catch (error) {
+          throw new Error(`细分“其他”失败：${error.message}`);
+        }
+      }
+
+      const sortedOther = Array.from(otherCategoryCounts.entries())
+        .filter(([name]) => name !== '其他')
+        .sort((a, b) => b[1] - a[1]);
+
+      const topOther = sortedOther[0];
+      if (topOther) {
+        const [candidate, candidateCount] = topOther;
+        const existingCounts = Array.from(categoryCounts.entries())
+          .filter(([name]) => name !== '其他')
+          .sort((a, b) => a[1] - b[1]);
+        const smallest = existingCounts[0];
+
+        if (!smallest || candidateCount > smallest[1]) {
+          promotedCategory = candidate;
+          let removedCategory = null;
+
+          if (allowedCategories && allowedCategories.size >= maxCategories && smallest) {
+            removedCategory = smallest[0];
+            allowedCategories.delete(removedCategory);
+          }
+
+          if (allowedCategories) {
+            allowedCategories.add(promotedCategory);
+          }
+
+          if (removedCategory) {
+            for (const [id, entry] of assignments.entries()) {
+              if (entry.full === removedCategory) {
+                assignments.set(id, { full: '其他', top: '其他' });
+              }
+            }
+          }
+
+          for (const plan of otherPlans) {
+            for (const [category, indexSet] of plan.categories.entries()) {
+              if (category !== promotedCategory) continue;
+              for (const index of indexSet) {
+                if (typeof index === 'number' && index >= 0 && index < plan.bookmarks.length) {
+                  const bookmark = plan.bookmarks[index];
+                  if (bookmark) {
+                    assignments.set(bookmark.id, { full: promotedCategory, top: splitCategoryPath(promotedCategory)[0] || '其他' });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (const bookmark of bookmarks) {
+      const entry = assignments.get(bookmark.id);
+      const finalCategory = entry?.full || '其他';
+
+      const pathSegments = splitCategoryPath(finalCategory);
+      if (pathSegments.length === 0) continue;
+
+      let currentParentId = parentId;
+      for (const segment of pathSegments) {
+        const folder = await findOrCreateFolder(currentParentId, segment, folderCache);
+        currentParentId = folder.id;
+      }
+      usedCategoryPaths.add(pathSegments.join('/'));
+
+      try {
+        await chrome.bookmarks.move(bookmark.id, {
+          parentId: currentParentId
+        });
+        movedCount++;
+      } catch (e) {
+        console.error('Failed to move bookmark:', e);
+      }
+    }
+
+    if (aiSortCheckbox.checked) {
+      try {
+        const summaries = buildCategorySummaries(assignments, bookmarks, 6);
+        if (summaries.length > 0) {
+          showLoading('AI 正在排序分类...');
+          const sortPrompt = buildSortPrompt(summaries);
+          const sortResult = await callModel(config, sortPrompt);
+          const ordered = parseJsonResponse(sortResult);
+          if (Array.isArray(ordered) && ordered.length > 0) {
+            const topCategorySet = new Set(summaries.map(summary => summary.name));
+            await reorderTopLevelCategories(parentId, ordered, topCategorySet, folderCache, !shouldReset);
+          }
+        }
+      } catch (error) {
+        console.error('AI sort error:', error);
+      }
+    }
+
+    resetCompleted = true;
+
+    if (tempFolderId) {
+      const movedFromBackup = await moveRemainingFromBackup(tempFolderId, parentId, folderCache);
+      if (movedFromBackup > 0) {
+        usedCategoryPaths.add('其他');
+        movedCount += movedFromBackup;
+      }
+      try {
+        await chrome.bookmarks.removeTree(tempFolderId);
+      } catch (error) {
+        console.error('Failed to remove temp folder:', error);
+      }
+    }
+
     await updateStats();
-    showMessage(`✓ 已整理 ${movedCount} 个书签到 ${Object.keys(categories).length} 个分类`);
+    if (promotedCategory) {
+      showMessage(`✓ 已整理 ${movedCount} 个书签到 ${usedCategoryPaths.size} 个分类（其他拆出：${promotedCategory}）`);
+    } else {
+      showMessage(`✓ 已整理 ${movedCount} 个书签到 ${usedCategoryPaths.size} 个分类`);
+    }
   } catch (error) {
     console.error('Organize error:', error);
-    showMessage(error.message, 'error');
+    if (tempFolderTitle && !resetCompleted) {
+      showMessage(`${error.message}（已备份到 ${tempFolderTitle}）`, 'error');
+    } else {
+      showMessage(error.message, 'error');
+    }
   } finally {
     hideLoading();
   }
@@ -277,10 +972,12 @@ checkDeadBtn.addEventListener('click', async () => {
   showLoading('正在检测失效书签...');
   deadBookmarkIds = [];
   deadBookmarksList.innerHTML = '';
+  deadBookmarksSection.style.display = 'none';
 
   try {
     const { bookmarks } = await getAllBookmarks();
     const httpBookmarks = bookmarks.filter(b => b.url && b.url.startsWith('http'));
+    const shouldListDead = !autoDeleteCheckbox.checked;
 
     let checked = 0;
     const total = httpBookmarks.length;
@@ -301,14 +998,16 @@ checkDeadBtn.addEventListener('click', async () => {
 
         if (!result.alive) {
           deadBookmarkIds.push(bookmark.id);
-          const li = document.createElement('li');
-          li.innerHTML = `
-            <span class="dead-title">${bookmark.title || '无标题'}</span>
-            <span class="dead-status">${result.status || result.error || '无法访问'}</span>
-            <br><span class="dead-url">${bookmark.url}</span>
-          `;
-          li.title = bookmark.url;
-          deadBookmarksList.appendChild(li);
+          if (shouldListDead) {
+            const li = document.createElement('li');
+            li.innerHTML = `
+              <span class="dead-title">${bookmark.title || '无标题'}</span>
+              <span class="dead-status">${result.status || result.error || '无法访问'}</span>
+              <br><span class="dead-url">${bookmark.url}</span>
+            `;
+            li.title = bookmark.url;
+            deadBookmarksList.appendChild(li);
+          }
           deadCount++;
         }
       } catch (error) {
@@ -319,8 +1018,18 @@ checkDeadBtn.addEventListener('click', async () => {
     deadBookmarksEl.textContent = deadCount;
 
     if (deadCount > 0) {
-      deadBookmarksSection.style.display = 'block';
-      showMessage(`发现 ${deadCount} 个失效书签`);
+      if (autoDeleteCheckbox.checked) {
+        showLoading(`正在删除 ${deadCount} 个失效书签...`);
+        const { deleted, failed } = await deleteDeadBookmarks({ confirmDelete: false });
+        if (failed > 0) {
+          showMessage(`已删除 ${deleted} 个，${failed} 个删除失败`, 'error');
+        } else {
+          showMessage(`✓ 已删除 ${deleted} 个失效书签`);
+        }
+      } else {
+        deadBookmarksSection.style.display = 'block';
+        showMessage(`发现 ${deadCount} 个失效书签`);
+      }
     } else {
       deadBookmarksSection.style.display = 'none';
       showMessage('✓ 所有书签都正常');
@@ -335,28 +1044,13 @@ checkDeadBtn.addEventListener('click', async () => {
 
 // Delete dead bookmarks
 deleteDeadBtn.addEventListener('click', async () => {
-  if (deadBookmarkIds.length === 0) return;
-
-  if (!confirm(`确定要删除 ${deadBookmarkIds.length} 个失效书签吗？此操作不可撤销！`)) {
-    return;
+  const { deleted, failed } = await deleteDeadBookmarks({ confirmDelete: true });
+  if (deleted === 0 && failed === 0) return;
+  if (failed > 0) {
+    showMessage(`已删除 ${deleted} 个，${failed} 个删除失败`, 'error');
+  } else {
+    showMessage(`✓ 已删除 ${deleted} 个失效书签`);
   }
-
-  let deleted = 0;
-  for (const id of deadBookmarkIds) {
-    try {
-      await chrome.bookmarks.remove(id);
-      deleted++;
-    } catch (e) {
-      console.error('Failed to remove bookmark:', e);
-    }
-  }
-
-  deadBookmarkIds = [];
-  deadBookmarksList.innerHTML = '';
-  deadBookmarksSection.style.display = 'none';
-  deadBookmarksEl.textContent = '0';
-  await updateStats();
-  showMessage(`✓ 已删除 ${deleted} 个失效书签`);
 });
 
 // Initialize on load
