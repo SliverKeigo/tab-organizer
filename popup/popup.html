@@ -16,10 +16,53 @@
     <!-- 设置区域 -->
     <div class="settings-section" id="settings-section">
       <div class="setting-item">
-        <label for="api-key">Gemini API Key</label>
-        <input type="password" id="api-key" placeholder="输入你的 API Key">
-        <button id="save-key" class="btn-small">保存</button>
+        <label for="api-provider">API 类型</label>
+        <select id="api-provider">
+          <option value="gemini">Gemini（官方）</option>
+          <option value="openai">OpenAI Compatible（本地/自建）</option>
+        </select>
       </div>
+      <div class="setting-item">
+        <label for="api-base">API Base</label>
+        <input type="text" id="api-base" placeholder="https://... 或 http://127.0.0.1:2223/v1">
+      </div>
+      <div class="setting-item">
+        <label for="api-model">Model</label>
+        <input type="text" id="api-model" placeholder="gemini-2.5-flash 或 local-model">
+      </div>
+      <div class="setting-item">
+        <label for="auto-delete">自动删除</label>
+        <input type="checkbox" id="auto-delete">
+      </div>
+      <div class="setting-item">
+        <label for="cleanup-before">分类前清理</label>
+        <input type="checkbox" id="cleanup-before">
+      </div>
+      <div class="setting-item">
+        <label for="ai-sort">AI 排序</label>
+        <input type="checkbox" id="ai-sort">
+      </div>
+      <div class="setting-item">
+        <label for="reset-structure">重建分类</label>
+        <input type="checkbox" id="reset-structure">
+      </div>
+      <div class="setting-item">
+        <label for="flat-categories">扁平分类</label>
+        <input type="checkbox" id="flat-categories">
+      </div>
+      <div class="setting-item">
+        <label for="max-categories">分类上限</label>
+        <input type="number" id="max-categories" min="3" max="30" placeholder="例如 12">
+      </div>
+      <div class="setting-item">
+        <label for="custom-categories">自定义</label>
+        <input type="text" id="custom-categories" placeholder="技术, 工具, 娱乐, 其他">
+      </div>
+      <div class="setting-item">
+        <label for="api-key">API Key</label>
+        <input type="password" id="api-key" placeholder="可选，部分本地 API 不需要">
+      </div>
+      <button id="save-key" class="btn-small btn-block">保存设置</button>
       <div class="status" id="key-status"></div>
     </div>
 
